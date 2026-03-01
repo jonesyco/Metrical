@@ -90,15 +90,22 @@ export default function PracticeScreen() {
 
     const streamRef = useRef<MediaStream | null>(null);
     const liveWordLogRef = useRef<string[]>([]);
+
+
+    const beatsPerBar = 4;
+
     const [metroPulseToken, setMetroPulseToken] = useState(0);
+    const [beatInBar, setBeatInBar] = useState(1);   // 1..4
+    const [barCount, setBarCount] = useState(1);
+
     const metroTimerRef = useRef<number | null>(null);
+    const beatCounterRef = useRef<number>(0); // counts total beats since drill start
 
     useEffect(() => {
         met.setBpm(bpm);
     }, [bpm, met]);
 
     useEffect(() => {
-        // Only run while a session is active (met is started during drills)
         if (!isRunning) {
             if (metroTimerRef.current) window.clearTimeout(metroTimerRef.current);
             metroTimerRef.current = null;
@@ -116,8 +123,18 @@ export default function PracticeScreen() {
 
             metroTimerRef.current = window.setTimeout(() => {
                 if (cancelled) return;
+
+                // advance beat counters
+                beatCounterRef.current += 1;
+
+                const beat = ((beatCounterRef.current - 1) % beatsPerBar) + 1; // 1..4
+                const bar = Math.floor((beatCounterRef.current - 1) / beatsPerBar) + 1;
+
+                setBeatInBar(beat);
+                setBarCount(bar);
                 setMetroPulseToken((t) => t + 1);
-                tick(); // schedule the next beat pulse
+
+                tick(); // schedule next beat pulse
             }, delayMs);
         };
 
@@ -129,7 +146,6 @@ export default function PracticeScreen() {
             metroTimerRef.current = null;
         };
     }, [isRunning, met, bpm]);
-
 
     const whisperRef = useRef<WhisperStreamHandle | null>(null);
     const emitPartialRef = useRef<((t: string) => void) | null>(null);
@@ -238,6 +254,11 @@ export default function PracticeScreen() {
         setStatus("Transcribing…");
         setTimeout(() => met.stop(), 250);
 
+        beatCounterRef.current = 0;
+        setBeatInBar(1);
+        setBarCount(1);
+        setMetroPulseToken(0);
+
         // 8) Upload to server (your existing STT endpoint)
         const form = new FormData();
         form.append("audio", rec.blob, "take.webm");
@@ -342,7 +363,13 @@ export default function PracticeScreen() {
                     />
                 </label>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <VisualMetronome pulseToken={metroPulseToken} size={22} />
+                    <VisualMetronome
+                        pulseToken={metroPulseToken}
+                        isDownbeat={beatInBar === 1}
+                        beatInBar={beatInBar}
+                        barCount={barCount}
+                        size={22}
+                    />
                     <div style={{ fontSize: 12, opacity: 0.8 }}>Beat</div>
                 </div>
                 <button onClick={makePlan} disabled={isRunning} style={{ padding: "10px 14px", fontWeight: 700 }}>
