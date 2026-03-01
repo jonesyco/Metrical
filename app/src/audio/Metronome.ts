@@ -1,124 +1,164 @@
 export type MetronomeHandle = {
-    start: () => void;
-    stop: () => void;
-    setBpm: (bpm: number) => void;
-    getBpm: () => number;
-    getAudioContextTime: () => number;
-    getBeatTimes: () => number[];
-    scheduleCountInAndReturnStartTime: (bars: number) => number;
-    getNextBeatTime: (fromTime?: number) => number;
+  start: () => void;
+  stop: () => void;
+  setBpm: (bpm: number) => void;
+  getBpm: () => number;
+  getAudioContextTime: () => number;
+  getBeatTimes: () => number[];
+  scheduleCountInAndReturnStartTime: (bars: number) => number;
+  getNextBeatTime: (fromTime?: number) => number;
 };
 
+type AudioContextCtorType = typeof AudioContext;
+
+function clampInt(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+/**
+ * Low-frequency "thud" pulse metronome.
+ * - accent on beat 1 (downbeat) each bar of 4/4
+ * - short envelope to avoid chirp
+ */
+function scheduleThud(audioCtx: AudioContext, when: number, accent: boolean, volume: number) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+
+  // Low freq thud
+  const f0 = accent ? 95 : 75;
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(f0, when);
+
+  // quick pitch drop gives a kick-drum feel
+  osc.frequency.exponentialRampToValueAtTime(f0 * 0.62, when + 0.06);
+
+  // Envelope (very fast attack, short decay)
+  const peak = (accent ? 0.55 : 0.38) * volume;
+  gain.gain.setValueAtTime(0.0001, when);
+  gain.gain.exponentialRampToValueAtTime(peak, when + 0.002);
+  gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.12);
+
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  osc.start(when);
+  osc.stop(when + 0.13);
+}
+
 export function createMetronome(initialBpm = 90): MetronomeHandle {
-    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-    const ctx = new AudioContextCtor();
+  const AudioContextCtor = (window.AudioContext || (window as any).webkitAudioContext) as AudioContextCtorType;
+  const ctx = new AudioContextCtor();
 
-    let bpm = initialBpm;
-    let isRunning = false;
+  let bpm = clampInt(initialBpm, 40, 220);
+  let isRunning = false;
 
-    // Scheduling
-    const lookAheadMs = 25;
-    const scheduleAheadSec = 0.25;
+  // Scheduling
+  const lookAheadMs = 25;
+  const scheduleAheadSec = 0.25;
 
-    let nextBeatTime = 0;
-    let beatIndex = 0;
+  let nextBeatTime = 0;
+  let beatIndex = 0; // increments each beat; downbeat is beatIndex % 4 === 0
 
-    const beatTimes: number[] = [];
+  const beatTimes: number[] = [];
+  let timer: number | null = null;
 
-    let timer: number | null = null;
+  function secondsPerBeat() {
+    return 60 / bpm;
+  }
 
-    function secondsPerBeat() {
-        return 60 / bpm;
+  function scheduleBeat(time: number, index: number) {
+    const isDownbeat = index % 4 === 0;
+
+    // Volume tuning: keep it audible but not piercing.
+    // You can expose this later as a UI slider if desired.
+    const clickVolume = 0.40;
+
+    scheduleThud(ctx, time, isDownbeat, clickVolume);
+
+    beatTimes.push(time);
+    // keep the list from growing forever
+    if (beatTimes.length > 1024) beatTimes.splice(0, beatTimes.length - 1024);
+  }
+
+  function scheduler() {
+    const now = ctx.currentTime;
+
+    // Schedule beats up to now + scheduleAheadSec
+    while (nextBeatTime < now + scheduleAheadSec) {
+      scheduleBeat(nextBeatTime, beatIndex);
+      nextBeatTime += secondsPerBeat();
+      beatIndex++;
+    }
+  }
+
+  function start() {
+    if (isRunning) return;
+    isRunning = true;
+
+    // Must resume on a user gesture, but calling resume here is OK; if blocked,
+    // it will resume once user interacts.
+    if (ctx.state !== "running") void ctx.resume();
+
+    // Initialize schedule
+    nextBeatTime = ctx.currentTime + 0.05;
+    beatIndex = 0;
+    beatTimes.length = 0;
+
+    timer = window.setInterval(scheduler, lookAheadMs);
+  }
+
+  function stop() {
+    isRunning = false;
+    if (timer !== null) window.clearInterval(timer);
+    timer = null;
+  }
+
+  function scheduleCountInAndReturnStartTime(bars: number) {
+    // Ensure running so ctx.currentTime advances and scheduling works
+    if (!isRunning) start();
+
+    const now = ctx.currentTime;
+    const spb = secondsPerBeat();
+    const totalBeats = Math.max(0, Math.floor(bars)) * 4;
+
+    // Start count-in slightly in the future
+    const firstBeatTime = now + 0.10;
+
+    // Session starts immediately after count-in completes
+    const sessionStartTime = firstBeatTime + totalBeats * spb;
+
+    // Pre-schedule count-in thuds (does not interfere with the scheduler;
+    // it’s just extra scheduled sound events)
+    for (let i = 0; i < totalBeats; i++) {
+      const t = firstBeatTime + i * spb;
+      const isDownbeat = i % 4 === 0;
+      scheduleThud(ctx, t, isDownbeat, 0.14);
     }
 
-    function click(time: number, isDownbeat: boolean) {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
+    return sessionStartTime;
+  }
 
-        osc.type = "square";
-        osc.frequency.value = isDownbeat ? 1000 : 750;
+  function getNextBeatTime(fromTime?: number) {
+    const t = fromTime ?? ctx.currentTime;
+    const spb = secondsPerBeat();
 
-        gain.gain.setValueAtTime(0.0001, time);
-        gain.gain.exponentialRampToValueAtTime(0.3, time + 0.001);
-        gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.03);
+    // If not started yet, approximate one beat ahead
+    if (!isFinite(nextBeatTime) || nextBeatTime <= 0) return t + spb;
 
-        osc.connect(gain);
-        gain.connect(ctx.destination);
+    // nextBeatTime is "next scheduled beat timestamp" maintained by scheduler
+    return nextBeatTime > t ? nextBeatTime : t + spb;
+  }
 
-        osc.start(time);
-        osc.stop(time + 0.04);
-    }
-
-    function scheduler() {
-        const now = ctx.currentTime;
-        while (nextBeatTime < now + scheduleAheadSec) {
-            const isDownbeat = beatIndex % 4 === 0;
-            click(nextBeatTime, isDownbeat);
-
-            beatTimes.push(nextBeatTime);
-
-            nextBeatTime += secondsPerBeat();
-            beatIndex++;
-        }
-    }
-
-    function start() {
-        if (isRunning) return;
-        isRunning = true;
-
-        if (ctx.state !== "running") void ctx.resume();
-
-        // initialize schedule
-        nextBeatTime = ctx.currentTime + 0.05;
-        beatIndex = 0;
-        beatTimes.length = 0;
-
-        timer = window.setInterval(scheduler, lookAheadMs);
-    }
-
-    function stop() {
-        isRunning = false;
-        if (timer) window.clearInterval(timer);
-        timer = null;
-    }
-
-    function scheduleCountInAndReturnStartTime(bars: number) {
-        // Ensure running so ctx.currentTime is advancing.
-        if (!isRunning) start();
-
-        // Next downbeat time (approx): align to next beat boundary.
-        const now = ctx.currentTime;
-        const spb = secondsPerBeat();
-        const firstBeatTime = now + 0.10;
-        const totalBeats = bars * 4;
-
-        // We will treat the first beat in this count-in as beatIndex=0 downbeat.
-        // Session start will be the downbeat immediately AFTER count-in completes.
-        const sessionStartTime = firstBeatTime + totalBeats * spb;
-
-        // Pre-schedule count-in clicks (so UI can sync if needed)
-        for (let i = 0; i < totalBeats; i++) {
-            const t = firstBeatTime + i * spb;
-            click(t, i % 4 === 0);
-        }
-
-        return sessionStartTime;
-    }
-
-    return {
-        start,
-        stop,
-        setBpm: (v) => (bpm = Math.max(40, Math.min(220, Math.round(v)))),
-        getBpm: () => bpm,
-        getAudioContextTime: () => ctx.currentTime,
-        getBeatTimes: () => [...beatTimes],
-        scheduleCountInAndReturnStartTime,
-        getNextBeatTime: (fromTime?: number) => {
-            const t = fromTime ?? ctx.currentTime;
-            // nextBeatTime is the scheduler’s next scheduled beat timestamp
-            // If scheduler hasn't run yet, approximate one beat ahead
-            if (!isFinite(nextBeatTime) || nextBeatTime <= 0) return t + secondsPerBeat();
-            return nextBeatTime > t ? nextBeatTime : (t + secondsPerBeat());
-        },
-    };
+  return {
+    start,
+    stop,
+    setBpm: (v) => {
+      bpm = clampInt(v, 40, 220);
+    },
+    getBpm: () => bpm,
+    getAudioContextTime: () => ctx.currentTime,
+    getBeatTimes: () => [...beatTimes],
+    scheduleCountInAndReturnStartTime,
+    getNextBeatTime,
+  };
 }

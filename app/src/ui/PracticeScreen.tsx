@@ -7,6 +7,10 @@ import { DRILLS, SKILL_DISPLAY } from "../engine/DrillLibrary";
 import { planDailySession } from "../engine/CurriculumEngine";
 import { skillsFromPhrasingMetrics, updateSkillSnapshot } from "../engine/SkillModel";
 import { updateReviewSchedule } from "../engine/ReviewScheduler";
+import { createWhisperStream } from "../audio/WhisperStreamClient";
+import type { WhisperStreamHandle } from "../audio/WhisperStreamClient";
+import WaveformBackground from "./WaveformBackground";
+import VisualMetronome from "./VisualMetronome";
 import {
     getLatestSkills,
     getReviewSchedule,
@@ -15,7 +19,6 @@ import {
     saveSkills,
 } from "../storage/db";
 import type { DrillId, PlannedSession, SkillKey } from "../engine/Types";
-import { createLiveSpeech } from "../audio/LiveSpeech";
 
 type TranscribeResponse = {
     transcript: string;
@@ -26,20 +29,40 @@ function uuid() {
     return crypto.randomUUID();
 }
 
-function isLiveSpeechSupported() {
-    return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+// function isLiveSpeechSupported() {
+//     return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+// }
+
+function makeWordDeltaEmitter(onWord: (w: string) => void) {
+    let lastTokens: string[] = [];
+
+    return (partialText: string) => {
+        const tokens = partialText
+            .trim()
+            .split(/\s+/)
+            .map(t => t.replace(/[^\w'-]/g, ""))
+            .filter(Boolean);
+
+        // common-prefix diff
+        let common = 0;
+        while (common < lastTokens.length && common < tokens.length && lastTokens[common] === tokens[common]) {
+            common++;
+        }
+        for (let i = common; i < tokens.length; i++) onWord(tokens[i]);
+        lastTokens = tokens;
+    };
 }
 
 export default function PracticeScreen() {
     const met = useMemo(() => createMetronome(90), []);
     const [bpm, setBpm] = useState(90);
-    const [liveSpeechSupported] = useState<boolean>(() => isLiveSpeechSupported());
     const [liveRibbon, setLiveRibbon] = useState<string[]>([]);
+    const [pulseToken, setPulseToken] = useState(0);
+    const [lastLiveWord, setLastLiveWord] = useState<string>("");
+    const [micStream, setMicStream] = useState<MediaStream | null>(null);
     //const [flashOn, setFlashOn] = useState(false);
 
-    const liveSpeechRef = useRef<ReturnType<typeof createLiveSpeech> | null>(null);
     //const flashTimerRef = useRef<number | null>(null);
-    const beatSyncTimerRef = useRef<number | null>(null);
 
     const [status, setStatus] = useState("Ready");
     const [isRunning, setIsRunning] = useState(false);
@@ -54,6 +77,7 @@ export default function PracticeScreen() {
             description: string;
             durationSec: number;
         };
+        liveTranscript: string;
         transcript: string;
         metrics: Record<string, unknown>;
         coach: { strength: string; focus: string; next: string };
@@ -65,46 +89,75 @@ export default function PracticeScreen() {
     const [lastFeedback, setLastFeedback] = useState<FeedbackModel | null>(null);
 
     const streamRef = useRef<MediaStream | null>(null);
+    const liveWordLogRef = useRef<string[]>([]);
+    const [metroPulseToken, setMetroPulseToken] = useState(0);
+    const metroTimerRef = useRef<number | null>(null);
 
     useEffect(() => {
         met.setBpm(bpm);
     }, [bpm, met]);
 
     useEffect(() => {
-        const live = createLiveSpeech({
-            onWord: (w) => {
-                console.log("LIVE WORD:", w);
-                setLiveRibbon((prev) => [...prev, w].slice(-4));
-                //setFlashOn(true);
-            }
-            // onWord: (w) => {
-            //     // schedule the flash at the next metronome beat
-            //     const now = met.getAudioContextTime();
-            //     const nextBeat = met.getNextBeatTime(now);
-            //     const delayMs = Math.max(0, (nextBeat - now) * 1000);
+        // Only run while a session is active (met is started during drills)
+        if (!isRunning) {
+            if (metroTimerRef.current) window.clearTimeout(metroTimerRef.current);
+            metroTimerRef.current = null;
+            return;
+        }
 
-            //     if (beatSyncTimerRef.current) window.clearTimeout(beatSyncTimerRef.current);
+        let cancelled = false;
 
-            //     beatSyncTimerRef.current = window.setTimeout(() => {
-            //         setLiveRibbon((prev) => [...prev, w].slice(-4));
-            //         setFlashOn(false);
-            //         requestAnimationFrame(() => setFlashOn(true));
+        const tick = () => {
+            if (cancelled) return;
 
-            //         if (flashTimerRef.current) window.clearTimeout(flashTimerRef.current);
-            //         flashTimerRef.current = window.setTimeout(() => setFlashOn(false), 320);
-            //     }, delayMs);
-            // }
-        });
+            const now = met.getAudioContextTime();
+            const next = met.getNextBeatTime(now);
+            const delayMs = Math.max(0, (next - now) * 1000);
 
-        liveSpeechRef.current = live;
-        console.log("LiveSpeech supported:", live.isSupported);
+            metroTimerRef.current = window.setTimeout(() => {
+                if (cancelled) return;
+                setMetroPulseToken((t) => t + 1);
+                tick(); // schedule the next beat pulse
+            }, delayMs);
+        };
+
+        tick();
 
         return () => {
-            live.stop();
-            //if (flashTimerRef.current) window.clearTimeout(flashTimerRef.current);
-            if (beatSyncTimerRef.current) window.clearTimeout(beatSyncTimerRef.current);
+            cancelled = true;
+            if (metroTimerRef.current) window.clearTimeout(metroTimerRef.current);
+            metroTimerRef.current = null;
         };
-    }, [met]);
+    }, [isRunning, met, bpm]);
+
+
+    const whisperRef = useRef<WhisperStreamHandle | null>(null);
+    const emitPartialRef = useRef<((t: string) => void) | null>(null);
+
+    // 1) Build the emitter once
+    useEffect(() => {
+        emitPartialRef.current = makeWordDeltaEmitter((w) => {
+            liveWordLogRef.current.push(w);
+            setLastLiveWord(w);
+            setPulseToken((t) => t + 1);
+            setLiveRibbon((prev) => [...prev, w].slice(-4));
+        });
+    }, []);
+
+    // 2) Create the whisper stream once
+    useEffect(() => {
+        console.log("createWhisperStream:", createWhisperStream);
+
+        whisperRef.current = createWhisperStream({
+            wsUrl: "ws://localhost:3001/ws/asr",
+            onPartialText: (text) => emitPartialRef.current?.(text),
+        });
+
+        return () => {
+            whisperRef.current?.stop();
+            whisperRef.current = null;
+        };
+    }, []);
 
     async function makePlan() {
         const now = Date.now();
@@ -125,45 +178,71 @@ export default function PracticeScreen() {
         if (!drill) return;
 
         setLastFeedback(null);
+        setLiveRibbon([]); // clear ribbon at start
+        liveWordLogRef.current = [];
+        setLastLiveWord("");
+        setPulseToken(0);
         setStatus(`Mic… (${drill.title})`);
 
+        // 1) Get mic stream (for recording upload + metronome permission chain)
         const stream = await startMic();
         streamRef.current = stream;
+        setMicStream(stream);
 
         const recorder = recordStream(stream);
 
+        // 2) Start session systems
         setIsRunning(true);
         met.start();
         setStatus(`Count-in… (${drill.title})`);
 
+        // 3) Schedule downbeat
         const sessionStartTime = met.scheduleCountInAndReturnStartTime(1);
         const durationSec = drill.durationSec;
         const stopTime = sessionStartTime + durationSec;
 
-        // Start on downbeat
-        const startDelayMs = Math.max(0, (sessionStartTime - met.getAudioContextTime()) * 1000);
+        // 4) Start Whisper streaming ASAP (after AudioContext is running)
+        //    Do this BEFORE waiting for downbeat so Whisper has time to "warm up".
+        if (whisperRef.current && !whisperRef.current.isRunning()) {
+            console.log("Starting Whisper stream now");
+            try {
+                await whisperRef.current.start(stream);
+            } catch (e) {
+                console.log("Whisper stream start failed:", e);
+                // continue drill even if ribbon fails
+            }
+        }
+
+        // 5) Wait until downbeat, then start recording
+        const startDelayMs = Math.max(
+            0,
+            (sessionStartTime - met.getAudioContextTime()) * 1000
+        );
         await new Promise((r) => setTimeout(r, startDelayMs));
-        console.log("Starting LiveSpeech now");
-        liveSpeechRef.current?.start();
+
         recorder.start();
         setStatus(`Recording… ${drill.title}`);
 
-        // Stop
+        // 6) Wait until stop time, then stop recording
         const stopDelayMs = Math.max(0, (stopTime - met.getAudioContextTime()) * 1000);
         await new Promise((r) => setTimeout(r, stopDelayMs));
+
         const rec = await recorder.stop();
-        console.log("Stopping LiveSpeech now");
-        liveSpeechRef.current?.stop();
-        // setFlashOn(false);
-        setLiveRibbon([]);
+
+        // 7) Stop Whisper streaming + clear ribbon (or keep it if you prefer)
+        if (whisperRef.current?.isRunning()) {
+            console.log("Stopping Whisper stream now");
+            whisperRef.current.stop();
+        }
+
         setStatus("Transcribing…");
         setTimeout(() => met.stop(), 250);
 
-        // Upload to server (still mock STT unless you replaced it)
+        // 8) Upload to server (your existing STT endpoint)
         const form = new FormData();
         form.append("audio", rec.blob, "take.webm");
 
-        const resp = await fetch("http://localhost:8787/api/transcribe", {
+        const resp = await fetch("http://localhost:3001/api/transcribe", {
             method: "POST",
             body: form,
         });
@@ -176,7 +255,7 @@ export default function PracticeScreen() {
             sessionStartSec: 0,
         });
 
-        // Save attempt
+        // 9) Save attempt
         const attemptId = uuid();
         await saveAttempt({
             id: attemptId,
@@ -190,16 +269,17 @@ export default function PracticeScreen() {
             metrics: analysis.metrics,
         });
 
-        // Update skills
+        // 10) Update skills
         const prev = await getLatestSkills();
         const observed = skillsFromPhrasingMetrics(analysis.metrics);
         const nextSkills = updateSkillSnapshot({ previous: prev, observed, at: Date.now() });
         await saveSkills(nextSkills);
 
-        // Update review schedule for the session focus skill (simple MVP)
+        // 11) Update review schedule
         const existingReviews = await getReviewSchedule();
         const focusSkill = plan.focusSkill as SkillKey;
         const perf = nextSkills.scores[focusSkill] ?? 50;
+
         const nextReviews = updateReviewSchedule({
             existing: existingReviews,
             now: Date.now(),
@@ -208,10 +288,11 @@ export default function PracticeScreen() {
         });
         await saveReviewSchedule(nextReviews);
 
-        // Light coaching feedback
+        // 12) Coaching feedback
         setLastFeedback({
             drill,
             transcript: data.transcript,
+            liveTranscript: liveWordLogRef.current.join(" "),
             metrics: analysis.metrics,
             coach: lightCoach(plan.focusSkill, nextSkills.scores[plan.focusSkill], analysis.metrics),
             learningScience: `${plan.why} Focus: ${SKILL_DISPLAY[plan.focusSkill]?.label ?? plan.focusSkill}.`,
@@ -219,7 +300,7 @@ export default function PracticeScreen() {
             step: { index: stepIndex + 1, total: plan.drills.length },
         });
 
-        // advance
+        // 13) Advance
         setIsRunning(false);
         setStatus("Saved ✅");
         setStepIndex((i) => Math.min(i + 1, plan.drills.length));
@@ -228,6 +309,7 @@ export default function PracticeScreen() {
     function cleanupMic() {
         streamRef.current?.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
+        setMicStream(null);
     }
 
     useEffect(() => () => cleanupMic(), []);
@@ -237,7 +319,13 @@ export default function PracticeScreen() {
     const done = plan ? stepIndex >= plan.drills.length : false;
 
     return (
-        <div style={{ maxWidth: 980, margin: "24px auto", padding: 16, fontFamily: "system-ui" }}>
+        <div style={{ maxWidth: 980, margin: "24px auto", padding: 16, fontFamily: "system-ui", position: "relative", zIndex: 1 }}>
+            <WaveformBackground
+                isActive={isRunning}
+                stream={micStream}
+                pulseToken={pulseToken}
+                label={lastLiveWord}
+            />
             <h1>Freestyle Trainer</h1>
 
             <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
@@ -253,7 +341,10 @@ export default function PracticeScreen() {
                         disabled={isRunning}
                     />
                 </label>
-
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <VisualMetronome pulseToken={metroPulseToken} size={22} />
+                    <div style={{ fontSize: 12, opacity: 0.8 }}>Beat</div>
+                </div>
                 <button onClick={makePlan} disabled={isRunning} style={{ padding: "10px 14px", fontWeight: 700 }}>
                     Plan Today’s Session
                 </button>
@@ -269,7 +360,7 @@ export default function PracticeScreen() {
                 <div>
                     <strong>Status:</strong> {status}
                     <div style={{ fontSize: 12, opacity: 0.8 }}>
-                        LiveSpeech: {liveSpeechSupported ? "supported" : "NOT supported"}
+                        Whisper: {whisperRef.current ? "initialized" : "not initialized"}
                     </div>
                 </div>
             </div>
@@ -354,7 +445,15 @@ export default function PracticeScreen() {
                         Drill {lastFeedback.step.index} / {lastFeedback.step.total}: <strong>{lastFeedback.drill.title}</strong>
                     </div>
 
-                    <p><strong>Transcript:</strong> {lastFeedback.transcript}</p>
+                    <h3>Transcript (Batch / Saved)</h3>
+                    <pre style={{ background: "#f7f7f7", color: "#111", border: "1px solid #e2e2e2", padding: 12, borderRadius: 10, overflowX: "auto", fontSize: 14, lineHeight: 1.5 }}>
+                        {lastFeedback.transcript || "(empty)"}
+                    </pre>
+
+                    <h3>Transcript (Live / Ribbon)</h3>
+                    <pre style={{ background: "#f7f7f7", color: "#111", border: "1px solid #e2e2e2", padding: 12, borderRadius: 10, overflowX: "auto", fontSize: 14, lineHeight: 1.5 }}>
+                        {lastFeedback.liveTranscript || "(empty)"}
+                    </pre>
 
                     <h3>Coach (Light)</h3>
                     <ul>
