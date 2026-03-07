@@ -16,37 +16,50 @@ export function createWhisperStream(params: {
   let stream: MediaStream | null = null;
 
   let running = false;
+  let reconnectAttempts = 0;
+  let reconnectTimer: number | null = null;
 
   async function start() {
-    if (running) return;
-    running = true;
+   if (running) return;
+   running = true;
+   reconnectAttempts = 0;
 
-    try {
-      ws = new WebSocket(params.wsUrl);
-	  console.log("[ASR WS] connecting to", params.wsURl);
-      ws.binaryType = "arraybuffer";
+   try {
+	 ws = new WebSocket(params.wsUrl);
+	 console.log("[ASR WS] connecting to", params.wsUrl);
+	 ws.binaryType = "arraybuffer";
 
-      ws.onmessage = (ev) => {
-        try {
-          const msg = JSON.parse(ev.data as string);
-          if (msg.type === "partial") params.onPartialText(msg.text);
-          if (msg.type === "error") params.onError?.(msg.message);
-        } catch {
-          // ignore
-        }
-      };
-	  
-	  ws.onopen = () => console.log("[ASR WS] open");
-	  ws.onclose = () => console.log("[ASR WS] close");
-	  ws.onerror = (e) => console.log("[ASR WS] error", e);
-      ws.onerror = () => params.onError?.("WebSocket error");
+	 ws.onmessage = (ev) => {
+	   try {
+		 const msg = JSON.parse(ev.data as string);
+		 if (msg.type === "partial") params.onPartialText(msg.text);
+		 if (msg.type === "error") params.onError?.(msg.message);
+	   } catch {
+		 // ignore
+	   }
+	 };
+
+	 ws.onopen = () => {
+	   console.log("[ASR WS] open");
+	   reconnectAttempts = 0;
+	 };
+
+	 ws.onclose = () => {
+	   console.log("[ASR WS] close");
+	   attemptReconnect();
+	 };
+
+	 ws.onerror = (e) => {
+	   console.log("[ASR WS] error", e);
+	   params.onError?.("WebSocket error");
+	 };
 
       // mic
       stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
-          noiseSuppression: false,
-          autoGainControl: false,
+          noiseSuppression: true,
+          autoGainControl: true,
         },
       });
 
@@ -74,8 +87,18 @@ export function createWhisperStream(params: {
     }
   }
 
+  function attemptReconnect() {
+    if (!running || reconnectAttempts >= 5) return;
+    const backoffMs = Math.min(10000, 1000 * Math.pow(2, reconnectAttempts));
+    reconnectAttempts++;
+    console.log(`[ASR WS] reconnecting in ${backoffMs}ms (attempt ${reconnectAttempts})`);
+    reconnectTimer = window.setTimeout(() => start(), backoffMs);
+  }
+
   function stop() {
     running = false;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = null;
 
     try { ws?.close(); } catch {}
     ws = null;
@@ -109,7 +132,11 @@ function downsampleFloatTo16kPCM16(input: Float32Array, inRate: number): ArrayBu
   let pos = 0;
   for (let i = 0; i < outLen; i++) {
     const idx = Math.floor(pos);
-    out[i] = input[idx] ?? 0;
+    const nextIdx = idx + 1;
+    const frac = pos - idx;
+    const current = input[idx] ?? 0;
+    const next = nextIdx < input.length ? (input[nextIdx] ?? 0) : 0;
+    out[i] = current * (1 - frac) + next * frac;
     pos += ratio;
   }
   return floatToPCM16(out);

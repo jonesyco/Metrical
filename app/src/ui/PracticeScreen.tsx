@@ -11,6 +11,8 @@ import { createWhisperStream } from "../audio/WhisperStreamClient";
 import type { WhisperStreamHandle } from "../audio/WhisperStreamClient";
 import WaveformBackground from "./WaveformBackground";
 import VisualMetronome from "./VisualMetronome";
+import { alignWordToBeatGrid, averageAlignmentScore } from "../engine/beatAlignment";
+import type { AlignedWord } from "../types/alignedWord";
 import {
     getLatestSkills,
     getReviewSchedule,
@@ -29,10 +31,6 @@ function uuid() {
     return crypto.randomUUID();
 }
 
-// function isLiveSpeechSupported() {
-//     return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
-// }
-
 function makeWordDeltaEmitter(onWord: (w: string) => void) {
     let lastTokens: string[] = [];
 
@@ -40,29 +38,69 @@ function makeWordDeltaEmitter(onWord: (w: string) => void) {
         const tokens = partialText
             .trim()
             .split(/\s+/)
-            .map(t => t.replace(/[^\w'-]/g, ""))
+            .map((t) => t.replace(/[^\w'-]/g, ""))
             .filter(Boolean);
 
-        // common-prefix diff
         let common = 0;
-        while (common < lastTokens.length && common < tokens.length && lastTokens[common] === tokens[common]) {
+        while (
+            common < lastTokens.length &&
+            common < tokens.length &&
+            lastTokens[common] === tokens[common]
+        ) {
             common++;
         }
+
         for (let i = common; i < tokens.length; i++) onWord(tokens[i]);
         lastTokens = tokens;
     };
 }
 
+function statCard(label: string, value: string | number, accent?: string) {
+    return (
+        <div
+            style={{
+                minWidth: 112,
+                padding: "10px 12px",
+                borderRadius: 14,
+                border: "1px solid rgba(255,255,255,0.09)",
+                background: "rgba(255,255,255,0.04)",
+                boxShadow: accent ? `0 0 0 1px ${accent} inset` : undefined,
+            }}
+        >
+            <div
+                style={{
+                    fontSize: 11,
+                    textTransform: "uppercase",
+                    letterSpacing: 1.1,
+                    opacity: 0.62,
+                    marginBottom: 4,
+                }}
+            >
+                {label}
+            </div>
+            <div
+                style={{
+                    fontSize: 24,
+                    fontWeight: 800,
+                    lineHeight: 1.1,
+                }}
+            >
+                {value}
+            </div>
+        </div>
+    );
+}
+
 export default function PracticeScreen() {
     const met = useMemo(() => createMetronome(90), []);
     const [bpm, setBpm] = useState(90);
-    const [liveRibbon, setLiveRibbon] = useState<string[]>([]);
     const [pulseToken, setPulseToken] = useState(0);
-    const [lastLiveWord, setLastLiveWord] = useState<string>("");
+    const [lastLiveWord, setLastLiveWord] = useState("");
     const [micStream, setMicStream] = useState<MediaStream | null>(null);
-    //const [flashOn, setFlashOn] = useState(false);
-
-    //const flashTimerRef = useRef<number | null>(null);
+    const metronomeStartTimeRef = useRef<number | null>(null);
+    const [alignedWords, setAlignedWords] = useState<AlignedWord[]>([]);
+    const [alignmentScore, setAlignmentScore] = useState(0);
+    const [viewportWidth, setViewportWidth] = useState<number>(window.innerWidth);
 
     const [status, setStatus] = useState("Ready");
     const [isRunning, setIsRunning] = useState(false);
@@ -91,15 +129,20 @@ export default function PracticeScreen() {
     const streamRef = useRef<MediaStream | null>(null);
     const liveWordLogRef = useRef<string[]>([]);
 
-
     const beatsPerBar = 4;
 
     const [metroPulseToken, setMetroPulseToken] = useState(0);
-    const [beatInBar, setBeatInBar] = useState(1);   // 1..4
+    const [beatInBar, setBeatInBar] = useState(1);
     const [barCount, setBarCount] = useState(1);
 
     const metroTimerRef = useRef<number | null>(null);
-    const beatCounterRef = useRef<number>(0); // counts total beats since drill start
+    const beatCounterRef = useRef<number>(0);
+
+    useEffect(() => {
+        const handleResize = () => setViewportWidth(window.innerWidth);
+        window.addEventListener("resize", handleResize);
+        return () => window.removeEventListener("resize", handleResize);
+    }, []);
 
     useEffect(() => {
         met.setBpm(bpm);
@@ -124,17 +167,16 @@ export default function PracticeScreen() {
             metroTimerRef.current = window.setTimeout(() => {
                 if (cancelled) return;
 
-                // advance beat counters
                 beatCounterRef.current += 1;
 
-                const beat = ((beatCounterRef.current - 1) % beatsPerBar) + 1; // 1..4
+                const beat = ((beatCounterRef.current - 1) % beatsPerBar) + 1;
                 const bar = Math.floor((beatCounterRef.current - 1) / beatsPerBar) + 1;
 
                 setBeatInBar(beat);
                 setBarCount(bar);
                 setMetroPulseToken((t) => t + 1);
 
-                tick(); // schedule next beat pulse
+                tick();
             }, delayMs);
         };
 
@@ -150,20 +192,44 @@ export default function PracticeScreen() {
     const whisperRef = useRef<WhisperStreamHandle | null>(null);
     const emitPartialRef = useRef<((t: string) => void) | null>(null);
 
-    // 1) Build the emitter once
     useEffect(() => {
         emitPartialRef.current = makeWordDeltaEmitter((w) => {
             liveWordLogRef.current.push(w);
             setLastLiveWord(w);
             setPulseToken((t) => t + 1);
-            setLiveRibbon((prev) => [...prev, w].slice(-4));
+
+            const now = performance.now();
+            const startTimeMs = metronomeStartTimeRef.current;
+
+            const alignment =
+                startTimeMs != null
+                    ? alignWordToBeatGrid(now, {
+                        bpm,
+                        subdivision: 4,
+                        startTimeMs,
+                    })
+                    : undefined;
+
+            const nextWord: AlignedWord = {
+                id: crypto.randomUUID(),
+                text: w,
+                timeMs: now,
+                alignment,
+            };
+
+            setAlignedWords((prev) => {
+                const next = [...prev, nextWord];
+                const scored = next
+                    .map((word) => word.alignment)
+                    .filter((value): value is NonNullable<typeof value> => value != null);
+
+                setAlignmentScore(averageAlignmentScore(scored));
+                return next;
+            });
         });
-    }, []);
+    }, [bpm]);
 
-    // 2) Create the whisper stream once
     useEffect(() => {
-        console.log("createWhisperStream:", createWhisperStream);
-
         whisperRef.current = createWhisperStream({
             wsUrl: "ws://localhost:3001/ws/asr",
             onPartialText: (text) => emitPartialRef.current?.(text),
@@ -194,60 +260,55 @@ export default function PracticeScreen() {
         if (!drill) return;
 
         setLastFeedback(null);
-        setLiveRibbon([]); // clear ribbon at start
+        setAlignedWords([]);
+        setAlignmentScore(0);
         liveWordLogRef.current = [];
         setLastLiveWord("");
         setPulseToken(0);
         setStatus(`Mic… (${drill.title})`);
 
-        // 1) Get mic stream (for recording upload + metronome permission chain)
         const stream = await startMic();
         streamRef.current = stream;
         setMicStream(stream);
 
         const recorder = recordStream(stream);
 
-        // 2) Start session systems
         setIsRunning(true);
         met.start();
         setStatus(`Count-in… (${drill.title})`);
 
-        // 3) Schedule downbeat
         const sessionStartTime = met.scheduleCountInAndReturnStartTime(1);
         const durationSec = drill.durationSec;
         const stopTime = sessionStartTime + durationSec;
 
-        // 4) Start Whisper streaming ASAP (after AudioContext is running)
-        //    Do this BEFORE waiting for downbeat so Whisper has time to "warm up".
-        if (whisperRef.current && !whisperRef.current.isRunning()) {
-            console.log("Starting Whisper stream now");
-            try {
-                await whisperRef.current.start(stream);
-            } catch (e) {
-                console.log("Whisper stream start failed:", e);
-                // continue drill even if ribbon fails
-            }
-        }
-
-        // 5) Wait until downbeat, then start recording
         const startDelayMs = Math.max(
             0,
             (sessionStartTime - met.getAudioContextTime()) * 1000
         );
+
+        metronomeStartTimeRef.current = performance.now() + startDelayMs;
+        setAlignedWords([]);
+        setAlignmentScore(0);
+
+        if (whisperRef.current && !whisperRef.current.isRunning()) {
+            try {
+                await whisperRef.current.start(stream);
+            } catch (e) {
+                console.log("Whisper stream start failed:", e);
+            }
+        }
+
         await new Promise((r) => setTimeout(r, startDelayMs));
 
         recorder.start();
         setStatus(`Recording… ${drill.title}`);
 
-        // 6) Wait until stop time, then stop recording
         const stopDelayMs = Math.max(0, (stopTime - met.getAudioContextTime()) * 1000);
         await new Promise((r) => setTimeout(r, stopDelayMs));
 
         const rec = await recorder.stop();
 
-        // 7) Stop Whisper streaming + clear ribbon (or keep it if you prefer)
         if (whisperRef.current?.isRunning()) {
-            console.log("Stopping Whisper stream now");
             whisperRef.current.stop();
         }
 
@@ -259,7 +320,6 @@ export default function PracticeScreen() {
         setBarCount(1);
         setMetroPulseToken(0);
 
-        // 8) Upload to server (your existing STT endpoint)
         const form = new FormData();
         form.append("audio", rec.blob, "take.webm");
 
@@ -276,7 +336,6 @@ export default function PracticeScreen() {
             sessionStartSec: 0,
         });
 
-        // 9) Save attempt
         const attemptId = uuid();
         await saveAttempt({
             id: attemptId,
@@ -290,13 +349,11 @@ export default function PracticeScreen() {
             metrics: analysis.metrics,
         });
 
-        // 10) Update skills
         const prev = await getLatestSkills();
         const observed = skillsFromPhrasingMetrics(analysis.metrics);
         const nextSkills = updateSkillSnapshot({ previous: prev, observed, at: Date.now() });
         await saveSkills(nextSkills);
 
-        // 11) Update review schedule
         const existingReviews = await getReviewSchedule();
         const focusSkill = plan.focusSkill as SkillKey;
         const perf = nextSkills.scores[focusSkill] ?? 50;
@@ -309,7 +366,6 @@ export default function PracticeScreen() {
         });
         await saveReviewSchedule(nextReviews);
 
-        // 12) Coaching feedback
         setLastFeedback({
             drill,
             transcript: data.transcript,
@@ -321,9 +377,9 @@ export default function PracticeScreen() {
             step: { index: stepIndex + 1, total: plan.drills.length },
         });
 
-        // 13) Advance
         setIsRunning(false);
         setStatus("Saved ✅");
+        metronomeStartTimeRef.current = null;
         setStepIndex((i) => Math.min(i + 1, plan.drills.length));
     }
 
@@ -335,211 +391,875 @@ export default function PracticeScreen() {
 
     useEffect(() => () => cleanupMic(), []);
 
+    const currentDrill = plan
+        ? DRILLS[plan.drills[Math.min(stepIndex, plan.drills.length - 1)] as DrillId]
+        : null;
 
-    const currentDrill = plan ? DRILLS[plan.drills[Math.min(stepIndex, plan.drills.length - 1)] as DrillId] : null;
     const done = plan ? stepIndex >= plan.drills.length : false;
 
+    const lastAlignedWord =
+        alignedWords.length > 0 ? alignedWords[alignedWords.length - 1] : null;
+
+    const currentCoach = lastFeedback?.coach;
+    const currentFocusLabel = plan
+        ? SKILL_DISPLAY[plan.focusSkill]?.label ?? plan.focusSkill
+        : "Awaiting plan";
+
+    const appBg = isRunning
+        ? "radial-gradient(circle at top, rgba(33,179,210,0.16), transparent 32%), linear-gradient(180deg, #0b1116 0%, #090c10 100%)"
+        : "radial-gradient(circle at top, rgba(255,255,255,0.05), transparent 28%), linear-gradient(180deg, #0b1116 0%, #090c10 100%)";
+
+    const isStackedLayout = viewportWidth < 1220;
+    const isNarrowStage = viewportWidth < 900;
+
     return (
-        <div style={{ maxWidth: 980, margin: "24px auto", padding: 16, fontFamily: "system-ui", position: "relative", zIndex: 1 }}>
-            <WaveformBackground
+        <div
+            style={{
+                minHeight: "100vh",
+                width: "100%",
+                position: "relative",
+                background: appBg,
+                color: "#eef4f7",
+                fontFamily: "system-ui",
+                overflowX: "hidden",
+                isolation: "isolate",
+            }}
+        >
+            {/* <WaveformBackground
                 isActive={isRunning}
                 stream={micStream}
                 pulseToken={pulseToken}
                 label={lastLiveWord}
-            />
-            <h1>Freestyle Trainer</h1>
+            /> */}
 
-            <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
-                <label>
-                    BPM: <strong>{bpm}</strong>
-                    <input
-                        type="range"
-                        min={70}
-                        max={120}
-                        value={bpm}
-                        onChange={(e) => setBpm(Number(e.target.value))}
-                        style={{ width: 260, display: "block" }}
-                        disabled={isRunning}
-                    />
-                </label>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <VisualMetronome
-                        pulseToken={metroPulseToken}
-                        isDownbeat={beatInBar === 1}
-                        beatInBar={beatInBar}
-                        barCount={barCount}
-                        size={22}
-                    />
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>Beat</div>
-                </div>
-                <button onClick={makePlan} disabled={isRunning} style={{ padding: "10px 14px", fontWeight: 700 }}>
-                    Plan Today’s Session
-                </button>
-
-                <button
-                    onClick={runCurrentDrill}
-                    disabled={isRunning || !plan || done}
-                    style={{ padding: "10px 14px", fontWeight: 700 }}
+            <div
+                style={{
+                    position: "sticky",
+                    top: 0,
+                    zIndex: 30,
+                    backdropFilter: "blur(10px)",
+                    background: "rgba(7,10,14,0.72)",
+                    borderBottom: "1px solid rgba(255,255,255,0.08)",
+                    boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
+                }}
+            >
+                <div
+                    style={{
+                        width: "100%",
+                        padding: "14px 24px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 18,
+                        flexWrap: "wrap",
+                        boxSizing: "border-box",
+                    }}
                 >
-                    {plan ? (done ? "Session Complete" : `Start Drill ${stepIndex + 1} / ${plan.drills.length}`) : "Start"}
-                </button>
+                    <div>
+                        <div
+                            style={{
+                                fontSize: 12,
+                                textTransform: "uppercase",
+                                letterSpacing: 1.6,
+                                opacity: 0.62,
+                                marginBottom: 3,
+                            }}
+                        >
+                            Performance Engine
+                        </div>
+                        <div
+                            style={{
+                                fontSize: 28,
+                                fontWeight: 900,
+                                lineHeight: 1,
+                            }}
+                        >
+                            Metronomic Articulator Engine
+                        </div>
+                    </div>
 
-                <div>
-                    <strong>Status:</strong> {status}
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>
-                        Whisper: {whisperRef.current ? "initialized" : "not initialized"}
+                    <div
+                        style={{
+                            display: "flex",
+                            gap: 10,
+                            flexWrap: "wrap",
+                            alignItems: "stretch",
+                        }}
+                    >
+                        {statCard("BPM", bpm, "rgba(80,200,255,0.35)")}
+                        {statCard("Beat", `${beatInBar}:${barCount}`, "rgba(255,180,80,0.35)")}
+                        {statCard("Alignment", `${alignmentScore}%`, "rgba(120,255,200,0.35)")}
+                        {statCard(
+                            "Whisper",
+                            whisperRef.current ? "Online" : "Init",
+                            whisperRef.current ? "rgba(120,255,200,0.35)" : undefined
+                        )}
+                        {statCard("Status", isRunning ? "REC" : "Idle", isRunning ? "rgba(255,90,90,0.45)" : undefined)}
                     </div>
                 </div>
             </div>
 
-            {plan && (
-                <div style={{ marginTop: 16, padding: 12, border: "1px solid #ddd", borderRadius: 12 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                        <div>
-                            <strong>Today’s Focus:</strong> {SKILL_DISPLAY[plan.focusSkill]?.label ?? plan.focusSkill}
-                            <div style={{ fontSize: 13, opacity: 0.8 }}>{plan.why}</div>
-                        </div>
-                        <div style={{ fontSize: 13, opacity: 0.8 }}>
-                            {currentDrill && !done ? (
-                                <>
-                                    <strong>Up next:</strong> {currentDrill.title} ({currentDrill.durationSec}s)
-                                </>
-                            ) : (
-                                <strong>Done</strong>
-                            )}
-                        </div>
-                    </div>
-
-                    <ol style={{ marginTop: 10 }}>
-                        {plan.drills.map((id, idx) => (
-                            <li key={id} style={{ opacity: idx < stepIndex ? 0.5 : 1 }}>
-                                <strong>{DRILLS[id as DrillId].title}</strong> — {DRILLS[id as DrillId].description}
-                            </li>
-                        ))}
-                    </ol>
-                </div>
-            )}
-
-            {liveRibbon.length > 0 && (
+            <div
+                style={{
+                    width: "100%",
+                    minHeight: "calc(100vh - 92px)",
+                    padding: "24px",
+                    position: "relative",
+                    zIndex: 20,
+                    boxSizing: "border-box",
+                }}
+            >
                 <div
                     style={{
-                        position: "fixed",
-                        top: 18,
-                        left: "50%",
-                        transform: "translateX(-50%)",
-                        padding: "10px 16px",
-                        borderRadius: 999,
-                        background: "rgba(0,0,0,0.65)",
-                        color: "white",
-                        fontWeight: 800,
-                        fontSize: 22,
-                        letterSpacing: 1,
-                        //opacity: flashOn ? 1 : 0,
-                        opacity: 1,
-                        transition: "opacity 120ms ease",
-                        pointerEvents: "none",
-                        zIndex: 9999,
-                        display: "flex",
-                        gap: 10,
-                        alignItems: "baseline",
-                        whiteSpace: "nowrap",
-                        backdropFilter: "blur(6px)",
+                        display: "grid",
+                        gridTemplateColumns: isStackedLayout
+                            ? "1fr"
+                            : "minmax(280px, 20vw) minmax(760px, 1fr) minmax(280px, 20vw)",
+                        gap: 24,
+                        alignItems: "start",
+                        width: "100%",
+                        minHeight: "calc(100vh - 140px)",
                     }}
                 >
-                    {liveRibbon.map((w, i) => {
-                        const isNewest = i === liveRibbon.length - 1;
-                        return (
-                            <span
-                                key={`${w}-${i}`}
+                    <aside
+                        style={{
+                            position: isStackedLayout ? "relative" : "sticky",
+                            top: isStackedLayout ? undefined : 108,
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 18,
+                            minHeight: isStackedLayout ? undefined : "calc(100vh - 160px)",
+                        }}
+                    >
+                        <section
+                            style={{
+                                padding: 18,
+                                borderRadius: 22,
+                                background: "rgba(255,255,255,0.05)",
+                                border: "1px solid rgba(255,255,255,0.08)",
+                                boxShadow: "0 18px 50px rgba(0,0,0,0.24)",
+                            }}
+                        >
+                            <div
                                 style={{
+                                    fontSize: 12,
                                     textTransform: "uppercase",
-                                    opacity: isNewest ? 1 : 0.55,
-                                    transform: isNewest ? "scale(1.06)" : "scale(1.0)",
-                                    transition: "transform 120ms ease, opacity 120ms ease",
+                                    letterSpacing: 1.4,
+                                    opacity: 0.62,
+                                    marginBottom: 10,
                                 }}
                             >
-                                {w}
-                            </span>
-                        );
-                    })}
-                </div>
-            )}
+                                Session
+                            </div>
 
-            {lastFeedback !== null && (
-                <div style={{ marginTop: 20, padding: 16, border: "1px solid #ddd", borderRadius: 12 }}>
-                    <h2>Feedback</h2>
-                    <div style={{ fontSize: 13, opacity: 0.8 }}>
-                        Drill {lastFeedback.step.index} / {lastFeedback.step.total}: <strong>{lastFeedback.drill.title}</strong>
-                    </div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                                <button
+                                    onClick={makePlan}
+                                    disabled={isRunning}
+                                    style={transportButtonStyle(false)}
+                                >
+                                    Plan Today’s Session
+                                </button>
 
-                    <h3>Transcript (Batch / Saved)</h3>
-                    <pre style={{ background: "#f7f7f7", color: "#111", border: "1px solid #e2e2e2", padding: 12, borderRadius: 10, overflowX: "auto", fontSize: 14, lineHeight: 1.5 }}>
-                        {lastFeedback.transcript || "(empty)"}
-                    </pre>
+                                <button
+                                    onClick={runCurrentDrill}
+                                    disabled={isRunning || !plan || done}
+                                    style={transportButtonStyle(true, isRunning || !plan || done)}
+                                >
+                                    {plan ? (done ? "Session Complete" : `Start Drill ${stepIndex + 1} / ${plan.drills.length}`) : "Start"}
+                                </button>
+                            </div>
 
-                    <h3>Transcript (Live / Ribbon)</h3>
-                    <pre style={{ background: "#f7f7f7", color: "#111", border: "1px solid #e2e2e2", padding: 12, borderRadius: 10, overflowX: "auto", fontSize: 14, lineHeight: 1.5 }}>
-                        {lastFeedback.liveTranscript || "(empty)"}
-                    </pre>
+                            <div
+                                style={{
+                                    marginTop: 16,
+                                    paddingTop: 14,
+                                    borderTop: "1px solid rgba(255,255,255,0.08)",
+                                    fontSize: 14,
+                                }}
+                            >
+                                <div style={{ marginBottom: 6 }}>
+                                    <strong>Status:</strong> {status}
+                                </div>
+                                <div style={{ opacity: 0.78 }}>
+                                    <strong>Focus:</strong> {currentFocusLabel}
+                                </div>
+                                <div style={{ marginTop: 10 }}>
+                                    <label style={{ display: "block", fontSize: 12, opacity: 0.7, marginBottom: 6 }}>
+                                        Tempo Control
+                                    </label>
+                                    <div style={{ marginBottom: 6, fontWeight: 700 }}>{bpm} BPM</div>
+                                    <input
+                                        type="range"
+                                        min={70}
+                                        max={120}
+                                        value={bpm}
+                                        onChange={(e) => setBpm(Number(e.target.value))}
+                                        style={{ width: "100%" }}
+                                        disabled={isRunning}
+                                    />
+                                </div>
+                            </div>
+                        </section>
 
-                    <h3>Coach (Light)</h3>
-                    <ul>
-                        <li><strong>Strength:</strong> {lastFeedback.coach.strength}</li>
-                        <li><strong>Focus:</strong> {lastFeedback.coach.focus}</li>
-                        <li><strong>Next:</strong> {lastFeedback.coach.next}</li>
-                    </ul>
+                        <section
+                            style={{
+                                padding: 18,
+                                borderRadius: 22,
+                                background: "rgba(255,255,255,0.05)",
+                                border: "1px solid rgba(255,255,255,0.08)",
+                                boxShadow: "0 18px 50px rgba(0,0,0,0.20)",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    fontSize: 12,
+                                    textTransform: "uppercase",
+                                    letterSpacing: 1.4,
+                                    opacity: 0.62,
+                                    marginBottom: 10,
+                                }}
+                            >
+                                Today’s Path
+                            </div>
 
-                    <h3>Learning Science</h3>
-                    <p>{lastFeedback.learningScience}</p>
+                            {plan ? (
+                                <>
+                                    <div style={{ marginBottom: 12 }}>
+                                        <div style={{ fontWeight: 800, marginBottom: 4 }}>
+                                            {SKILL_DISPLAY[plan.focusSkill]?.label ?? plan.focusSkill}
+                                        </div>
+                                        <div style={{ fontSize: 13, opacity: 0.78 }}>{plan.why}</div>
+                                    </div>
 
-                    <h3>Metrics</h3>
-                    <pre
+                                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                                        {plan.drills.map((id, idx) => {
+                                            const drill = DRILLS[id as DrillId];
+                                            const isCurrent = idx === stepIndex && !done;
+                                            const isDone = idx < stepIndex;
+                                            return (
+                                                <div
+                                                    key={`${id}-${idx}`}
+                                                    style={{
+                                                        padding: 12,
+                                                        borderRadius: 16,
+                                                        border: isCurrent
+                                                            ? "1px solid rgba(120,255,200,0.45)"
+                                                            : "1px solid rgba(255,255,255,0.08)",
+                                                        background: isCurrent
+                                                            ? "rgba(120,255,200,0.08)"
+                                                            : "rgba(255,255,255,0.03)",
+                                                        opacity: isDone ? 0.52 : 1,
+                                                        boxShadow: isCurrent
+                                                            ? "0 0 0 1px rgba(120,255,200,0.14) inset"
+                                                            : undefined,
+                                                    }}
+                                                >
+                                                    <div
+                                                        style={{
+                                                            display: "flex",
+                                                            justifyContent: "space-between",
+                                                            gap: 8,
+                                                            alignItems: "center",
+                                                            marginBottom: 5,
+                                                        }}
+                                                    >
+                                                        <strong style={{ fontSize: 14 }}>{drill.title}</strong>
+                                                        <span
+                                                            style={{
+                                                                fontSize: 11,
+                                                                padding: "4px 8px",
+                                                                borderRadius: 999,
+                                                                background: "rgba(255,255,255,0.07)",
+                                                                opacity: 0.78,
+                                                            }}
+                                                        >
+                                                            {drill.durationSec}s
+                                                        </span>
+                                                    </div>
+                                                    <div style={{ fontSize: 13, opacity: 0.74 }}>
+                                                        {drill.description}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </>
+                            ) : (
+                                <div style={{ fontSize: 14, opacity: 0.78 }}>
+                                    Build a daily plan to populate today’s drill path.
+                                </div>
+                            )}
+                        </section>
+                    </aside>
+
+                    <main
                         style={{
-                            background: "#f7f7f7",
-                            color: "var(--text-primary, #111)",
-                            border: "1px solid #e2e2e2",        // ✅ force readable text
-                            padding: 12,
-                            borderRadius: 10,
-                            overflowX: "auto",
-                            fontSize: 13,
-                            lineHeight: 1.4,
+                            minHeight: isStackedLayout ? undefined : "calc(100vh - 160px)",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 24,
                         }}
                     >
-                        {JSON.stringify(lastFeedback.metrics, null, 2)}
-                    </pre>
+                        <section
+                            style={{
+                                position: "relative",
+                                minHeight: isStackedLayout ? 560 : "70vh",
+                                borderRadius: 30,
+                                padding: "28px 24px 32px",
+                                border: "1px solid rgba(255,255,255,0.08)",
+                                background:
+                                    "linear-gradient(180deg, rgba(255,255,255,0.055) 0%, rgba(255,255,255,0.03) 100%)",
+                                boxShadow: "0 24px 80px rgba(0,0,0,0.28)",
+                                overflow: "hidden",
+                                display: "flex",
+                                flexDirection: "column",
+                                justifyContent: "center",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    position: "absolute",
+                                    inset: 0,
+                                    background:
+                                        "radial-gradient(circle at center, rgba(80,200,255,0.10), transparent 34%)",
+                                    pointerEvents: "none",
+                                }}
+                            />
 
-                    <h3>Skill Scores</h3>
-                    <pre
+                            <WaveformBackground
+                                isActive={isRunning}
+                                stream={micStream}
+                                pulseToken={pulseToken}
+                                label={lastLiveWord}
+                            />
+
+                            <div
+                                style={{
+                                    position: "relative",
+                                    zIndex: 1,
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    minHeight: isStackedLayout ? 500 : "100%",
+                                    gap: 18,
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        fontSize: 12,
+                                        textTransform: "uppercase",
+                                        letterSpacing: 1.6,
+                                        opacity: 0.62,
+                                    }}
+                                >
+                                    Stage
+                                </div>
+
+                                <div
+                                    style={{
+                                        fontSize: 18,
+                                        fontWeight: 800,
+                                        textAlign: "center",
+                                        opacity: 0.92,
+                                    }}
+                                >
+                                    {currentDrill && !done ? currentDrill.title : plan ? "Session Ready" : "Awaiting Session Plan"}
+                                </div>
+
+                                <div
+                                    style={{
+                                        fontSize: 13,
+                                        opacity: 0.72,
+                                        textAlign: "center",
+                                        maxWidth: 560,
+                                    }}
+                                >
+                                    {currentDrill && !done
+                                        ? currentDrill.description
+                                        : "Plan a session, then start the next drill to enter live timing mode."}
+                                </div>
+
+                                <div
+                                    style={{
+                                        position: "relative",
+                                        width: isNarrowStage ? 300 : 380,
+                                        height: isNarrowStage ? 300 : 380,
+                                        minWidth: isNarrowStage ? 300 : 380,
+                                        minHeight: isNarrowStage ? 300 : 380,
+                                        borderRadius: "50%",
+                                        display: "grid",
+                                        placeItems: "center",
+                                        overflow: "hidden",
+                                        background:
+                                            "radial-gradient(circle at center, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.025) 58%, transparent 72%)",
+                                        boxShadow: isRunning
+                                            ? "0 0 70px rgba(80,200,255,0.18), inset 0 0 60px rgba(255,255,255,0.035)"
+                                            : "inset 0 0 60px rgba(255,255,255,0.03)",
+                                        border: "1px solid rgba(255,255,255,0.09)",
+                                    }}
+                                >
+                                    <div
+                                        style={{
+                                            position: "absolute",
+                                            inset: 12,
+                                            borderRadius: "50%",
+                                            border: "1px solid rgba(255,255,255,0.08)",
+                                        }}
+                                    />
+                                    <div
+                                        style={{
+                                            position: "absolute",
+                                            inset: 38,
+                                            borderRadius: "50%",
+                                            border: "1px solid rgba(255,255,255,0.07)",
+                                        }}
+                                    />
+                                    <div
+                                        style={{
+                                            position: "absolute",
+                                            inset: 0,
+                                            display: "grid",
+                                            placeItems: "center",
+                                        }}
+                                    >
+                                        <VisualMetronome
+                                            pulseToken={metroPulseToken}
+                                            isDownbeat={beatInBar === 1}
+                                            beatInBar={beatInBar}
+                                            barCount={barCount}
+                                            size={42}
+                                        />
+                                    </div>
+                                </div>
+
+                                <div
+                                    style={{
+                                        display: "flex",
+                                        gap: 12,
+                                        flexWrap: "wrap",
+                                        justifyContent: "center",
+                                    }}
+                                >
+                                    <div
+                                        style={{
+                                            padding: "10px 14px",
+                                            borderRadius: 999,
+                                            background: "rgba(255,255,255,0.05)",
+                                            border: "1px solid rgba(255,255,255,0.08)",
+                                            fontSize: 13,
+                                        }}
+                                    >
+                                        Beat {beatInBar} of {beatsPerBar}
+                                    </div>
+                                    <div
+                                        style={{
+                                            padding: "10px 14px",
+                                            borderRadius: 999,
+                                            background: "rgba(255,255,255,0.05)",
+                                            border: "1px solid rgba(255,255,255,0.08)",
+                                            fontSize: 13,
+                                        }}
+                                    >
+                                        Bar {barCount}
+                                    </div>
+                                    <div
+                                        style={{
+                                            padding: "10px 14px",
+                                            borderRadius: 999,
+                                            background: "rgba(255,255,255,0.05)",
+                                            border: "1px solid rgba(255,255,255,0.08)",
+                                            fontSize: 13,
+                                        }}
+                                    >
+                                        Alignment {alignmentScore}%
+                                    </div>
+                                </div>
+
+                                {alignedWords.length > 0 && (
+                                    <>
+                                        <div
+                                            style={{
+                                                marginTop: 4,
+                                                padding: "12px 18px",
+                                                borderRadius: 999,
+                                                background: "rgba(0,0,0,0.45)",
+                                                color: "white",
+                                                fontWeight: 800,
+                                                fontSize: 22,
+                                                letterSpacing: 1,
+                                                display: "flex",
+                                                gap: 10,
+                                                alignItems: "baseline",
+                                                whiteSpace: "nowrap",
+                                                backdropFilter: "blur(10px)",
+                                                border: "1px solid rgba(255,255,255,0.08)",
+                                                boxShadow: "0 18px 40px rgba(0,0,0,0.24)",
+                                                maxWidth: "100%",
+                                                overflowX: "auto",
+                                            }}
+                                        >
+                                            {alignedWords.slice(-4).map((word, i, arr) => {
+                                                const isNewest = i === arr.length - 1;
+                                                const judgment = word.alignment?.judgment;
+
+                                                const style =
+                                                    judgment === "perfect"
+                                                        ? {
+                                                            opacity: 1,
+                                                            transform: "scale(1.1)",
+                                                            textShadow: "0 0 10px rgba(255,255,255,0.45)",
+                                                        }
+                                                        : judgment === "great"
+                                                            ? {
+                                                                opacity: 0.95,
+                                                                transform: "scale(1.06)",
+                                                                textShadow: "0 0 8px rgba(255,255,255,0.28)",
+                                                            }
+                                                            : judgment === "good"
+                                                                ? {
+                                                                    opacity: 0.85,
+                                                                    transform: "scale(1.02)",
+                                                                }
+                                                                : judgment === "early"
+                                                                    ? {
+                                                                        opacity: 0.8,
+                                                                        transform: "translateY(-3px)",
+                                                                    }
+                                                                    : judgment === "late"
+                                                                        ? {
+                                                                            opacity: 0.8,
+                                                                            transform: "translateY(3px)",
+                                                                        }
+                                                                        : {
+                                                                            opacity: 0.55,
+                                                                            transform: "scale(1)",
+                                                                        };
+
+                                                return (
+                                                    <span
+                                                        key={word.id}
+                                                        title={
+                                                            word.alignment
+                                                                ? `${word.alignment.offsetMs.toFixed(0)}ms • ${word.alignment.judgment}`
+                                                                : "unscored"
+                                                        }
+                                                        style={{
+                                                            textTransform: "uppercase",
+                                                            transition:
+                                                                "transform 120ms ease, opacity 120ms ease, text-shadow 120ms ease",
+                                                            fontWeight: isNewest ? 900 : 700,
+                                                            ...style,
+                                                        }}
+                                                    >
+                                                        {word.text}
+                                                    </span>
+                                                );
+                                            })}
+                                        </div>
+
+                                        {lastAlignedWord?.alignment && (
+                                            <div
+                                                style={{
+                                                    padding: "7px 12px",
+                                                    borderRadius: 999,
+                                                    background: "rgba(255,255,255,0.06)",
+                                                    border: "1px solid rgba(255,255,255,0.08)",
+                                                    fontSize: 12,
+                                                    letterSpacing: 0.5,
+                                                }}
+                                            >
+                                                {lastAlignedWord.alignment.offsetMs < 0 ? "Early" : "Late"}{" "}
+                                                {Math.abs(lastAlignedWord.alignment.offsetMs).toFixed(0)}ms •{" "}
+                                                {lastAlignedWord.alignment.judgment}
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                        </section>
+
+                        {lastFeedback !== null && (
+                            <section
+                                style={{
+                                    padding: 18,
+                                    borderRadius: 22,
+                                    background: "rgba(255,255,255,0.05)",
+                                    border: "1px solid rgba(255,255,255,0.08)",
+                                    boxShadow: "0 18px 50px rgba(0,0,0,0.20)",
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        display: "flex",
+                                        justifyContent: "space-between",
+                                        gap: 12,
+                                        flexWrap: "wrap",
+                                        alignItems: "center",
+                                        marginBottom: 14,
+                                    }}
+                                >
+                                    <h2 style={{ margin: 0 }}>Feedback</h2>
+                                    <div style={{ fontSize: 13, opacity: 0.78 }}>
+                                        Drill {lastFeedback.step.index} / {lastFeedback.step.total}:{" "}
+                                        <strong>{lastFeedback.drill.title}</strong>
+                                    </div>
+                                </div>
+
+                                <div
+                                    style={{
+                                        display: "grid",
+                                        gridTemplateColumns: isNarrowStage ? "1fr" : "1fr 1fr",
+                                        gap: 16,
+                                    }}
+                                >
+                                    <div>
+                                        <h3>Transcript (Batch / Saved)</h3>
+                                        <pre style={preStyle}>
+                                            {lastFeedback.transcript || "(empty)"}
+                                        </pre>
+                                    </div>
+
+                                    <div>
+                                        <h3>Transcript (Live / Ribbon)</h3>
+                                        <pre style={preStyle}>
+                                            {lastFeedback.liveTranscript || "(empty)"}
+                                        </pre>
+                                    </div>
+                                </div>
+
+                                <h3>Coach (Light)</h3>
+                                <ul>
+                                    <li><strong>Strength:</strong> {lastFeedback.coach.strength}</li>
+                                    <li><strong>Focus:</strong> {lastFeedback.coach.focus}</li>
+                                    <li><strong>Next:</strong> {lastFeedback.coach.next}</li>
+                                </ul>
+
+                                <h3>Learning Science</h3>
+                                <p>{lastFeedback.learningScience}</p>
+
+                                <div
+                                    style={{
+                                        display: "grid",
+                                        gridTemplateColumns: isNarrowStage ? "1fr" : "1fr 1fr",
+                                        gap: 16,
+                                    }}
+                                >
+                                    <div>
+                                        <h3>Metrics</h3>
+                                        <pre style={preStyle}>
+                                            {JSON.stringify(lastFeedback.metrics, null, 2)}
+                                        </pre>
+                                    </div>
+                                    <div>
+                                        <h3>Skill Scores</h3>
+                                        <pre style={preStyle}>
+                                            {JSON.stringify(lastFeedback.skills, null, 2)}
+                                        </pre>
+                                    </div>
+                                </div>
+                            </section>
+                        )}
+
+                        {plan && done && (
+                            <section
+                                style={{
+                                    padding: 18,
+                                    borderRadius: 22,
+                                    background: "rgba(120,255,200,0.08)",
+                                    border: "1px solid rgba(120,255,200,0.18)",
+                                    boxShadow: "0 18px 50px rgba(0,0,0,0.20)",
+                                }}
+                            >
+                                <h2 style={{ marginTop: 0 }}>Session Complete ✅</h2>
+                                <p style={{ marginBottom: 0 }}>
+                                    Next: unlock Free Flow mode (reward) — we’ll add it after Technical toggle.
+                                </p>
+                            </section>
+                        )}
+                    </main>
+
+                    <aside
                         style={{
-                            background: "#f7f7f7",
-                            color: "var(--text-primary, #111)",
-                            border: "1px solid #e2e2e2",       // ✅ force readable text
-                            padding: 12,
-                            borderRadius: 10,
-                            overflowX: "auto",
-                            fontSize: 13,
-                            lineHeight: 1.4,
+                            position: isStackedLayout ? "relative" : "sticky",
+                            top: isStackedLayout ? undefined : 108,
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 18,
+                            minHeight: isStackedLayout ? undefined : "calc(100vh - 160px)",
                         }}
                     >
-                        {JSON.stringify(lastFeedback.skills, null, 2)}
-                    </pre>
-                </div>
-            )}
+                        <section
+                            style={{
+                                padding: 18,
+                                borderRadius: 22,
+                                background: "rgba(255,255,255,0.05)",
+                                border: "1px solid rgba(255,255,255,0.08)",
+                                boxShadow: "0 18px 50px rgba(0,0,0,0.20)",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    fontSize: 12,
+                                    textTransform: "uppercase",
+                                    letterSpacing: 1.4,
+                                    opacity: 0.62,
+                                    marginBottom: 10,
+                                }}
+                            >
+                                Coach
+                            </div>
 
-            {plan && done && (
-                <div style={{ marginTop: 20, padding: 16, border: "1px solid #ddd", borderRadius: 12 }}>
-                    <h2>Session Complete ✅</h2>
-                    <p>Next: unlock Free Flow mode (reward) — we’ll add it after Technical toggle.</p>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                                <div style={coachInfoStyle}>
+                                    <div style={coachLabelStyle}>Current Focus</div>
+                                    <div style={coachValueStyle}>{currentFocusLabel}</div>
+                                </div>
+
+                                <div style={coachInfoStyle}>
+                                    <div style={coachLabelStyle}>Live Hint</div>
+                                    <div style={coachValueStyle}>
+                                        {currentCoach?.focus ?? "Enter bars cleanly and stay rhythmically consistent."}
+                                    </div>
+                                </div>
+
+                                <div style={coachInfoStyle}>
+                                    <div style={coachLabelStyle}>Strength</div>
+                                    <div style={coachValueStyle}>
+                                        {currentCoach?.strength ?? "Build a session plan to generate coaching feedback."}
+                                    </div>
+                                </div>
+
+                                <div style={coachInfoStyle}>
+                                    <div style={coachLabelStyle}>Next Move</div>
+                                    <div style={coachValueStyle}>
+                                        {currentCoach?.next ?? "Start a drill and let the engine observe your phrasing."}
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section
+                            style={{
+                                padding: 18,
+                                borderRadius: 22,
+                                background: "rgba(255,255,255,0.05)",
+                                border: "1px solid rgba(255,255,255,0.08)",
+                                boxShadow: "0 18px 50px rgba(0,0,0,0.20)",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    fontSize: 12,
+                                    textTransform: "uppercase",
+                                    letterSpacing: 1.4,
+                                    opacity: 0.62,
+                                    marginBottom: 10,
+                                }}
+                            >
+                                Live Metrics
+                            </div>
+
+                            <div style={{ display: "grid", gap: 10 }}>
+                                <div style={metricRowStyle}>
+                                    <span>Current Drill</span>
+                                    <strong>{currentDrill?.title ?? "—"}</strong>
+                                </div>
+                                <div style={metricRowStyle}>
+                                    <span>Last Live Word</span>
+                                    <strong>{lastLiveWord || "—"}</strong>
+                                </div>
+                                <div style={metricRowStyle}>
+                                    <span>Ribbon Words</span>
+                                    <strong>{alignedWords.length}</strong>
+                                </div>
+                                <div style={metricRowStyle}>
+                                    <span>Alignment</span>
+                                    <strong>{alignmentScore}%</strong>
+                                </div>
+                                <div style={metricRowStyle}>
+                                    <span>Whisper</span>
+                                    <strong>{whisperRef.current ? "initialized" : "not initialized"}</strong>
+                                </div>
+                            </div>
+                        </section>
+                    </aside>
                 </div>
-            )}
+            </div>
         </div>
     );
+}
+
+const preStyle: React.CSSProperties = {
+    background: "#f7f7f7",
+    color: "#111",
+    border: "1px solid #e2e2e2",
+    padding: 12,
+    borderRadius: 10,
+    overflowX: "auto",
+    fontSize: 13,
+    lineHeight: 1.45,
+};
+
+const coachInfoStyle: React.CSSProperties = {
+    padding: 12,
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,0.08)",
+    background: "rgba(255,255,255,0.03)",
+};
+
+const coachLabelStyle: React.CSSProperties = {
+    fontSize: 11,
+    textTransform: "uppercase",
+    letterSpacing: 1.1,
+    opacity: 0.62,
+    marginBottom: 6,
+};
+
+const coachValueStyle: React.CSSProperties = {
+    fontSize: 14,
+    lineHeight: 1.45,
+};
+
+const metricRowStyle: React.CSSProperties = {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 10,
+    alignItems: "center",
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,0.08)",
+    background: "rgba(255,255,255,0.03)",
+    fontSize: 13,
+};
+
+function transportButtonStyle(primary: boolean, disabled = false): React.CSSProperties {
+    return {
+        width: "100%",
+        padding: "12px 14px",
+        borderRadius: 14,
+        border: primary
+            ? "1px solid rgba(120,255,200,0.30)"
+            : "1px solid rgba(255,255,255,0.10)",
+        background: disabled
+            ? "rgba(255,255,255,0.04)"
+            : primary
+                ? "linear-gradient(180deg, rgba(120,255,200,0.20) 0%, rgba(120,255,200,0.09) 100%)"
+                : "linear-gradient(180deg, rgba(255,255,255,0.09) 0%, rgba(255,255,255,0.04) 100%)",
+        color: disabled ? "rgba(255,255,255,0.42)" : "#eef4f7",
+        fontWeight: 800,
+        letterSpacing: 0.4,
+        cursor: disabled ? "not-allowed" : "pointer",
+        boxShadow: disabled ? "none" : "0 10px 24px rgba(0,0,0,0.20)",
+    };
 }
 
 function lightCoach(
     focusSkill: SkillKey,
     focusScore: number,
-    m: PhrasingMetrics) {
+    m: PhrasingMetrics
+) {
     const strength =
         (m.barStartStrength ?? 0) >= 60
             ? "Your bar entries are coming in more musical than most beginners."

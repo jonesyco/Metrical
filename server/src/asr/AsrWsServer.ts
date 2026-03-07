@@ -30,7 +30,7 @@ export function attachAsrWebSocket(server: HttpServer, cfg: Config) {
 
     const interval = setInterval(async () => {
       if (!running || busy) return;
-      if (filled < Math.floor(cfg.sampleRate * 0.7)) return; // wait for enough audio
+      if (filled < Math.floor(cfg.sampleRate * 0.5)) return; // wait for enough audio
       busy = true;
 
       try {
@@ -52,7 +52,7 @@ export function attachAsrWebSocket(server: HttpServer, cfg: Config) {
       } finally {
         busy = false;
       }
-    }, cfg.stepMs);
+    }, 400);
 
     ws.on("message", (data) => {
       // We expect binary PCM16 little-endian
@@ -61,9 +61,12 @@ export function attachAsrWebSocket(server: HttpServer, cfg: Config) {
       const samples = new Int16Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 2));
 
       for (let i = 0; i < samples.length; i++) {
-        ring[writeIndex] = samples[i];
-        writeIndex = (writeIndex + 1) % ring.length;
-        filled = Math.min(ring.length, filled + 1);
+        const sample = samples[i];
+        if (sample !== undefined) {
+          ring[writeIndex] = sample;
+          writeIndex = (writeIndex + 1) % ring.length;
+          filled = Math.min(ring.length, filled + 1);
+        }
       }
     });
 
