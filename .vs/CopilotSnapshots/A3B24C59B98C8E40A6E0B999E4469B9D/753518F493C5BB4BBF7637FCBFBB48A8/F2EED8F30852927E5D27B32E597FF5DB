@@ -1,0 +1,93 @@
+﻿import type { Server as HttpServer } from "node:http";
+import { WebSocketServer } from "ws";
+import { pcm16ToWavBuffer } from "./wav";
+import { runWhisperOnWav } from "./WhisperRunner";
+
+type Config = {
+  whisperCliPath: string;
+  modelPath: string;
+  windowSec: number;
+  stepMs: number;
+  sampleRate: number; // must match client stream
+};
+
+export function attachAsrWebSocket(server: HttpServer, cfg: Config) {
+  const wss = new WebSocketServer({ server, path: "/ws/asr" });
+  
+
+  wss.on("connection", (ws) => {
+	  console.log("[ASR WS] client connected");
+	  ws.on("close", () => console.log("[ASR WS] client disconnected"));
+    // Ring buffer: last N seconds of PCM16 @ 16kHz
+    const capacitySamples = Math.max(1, Math.floor(cfg.windowSec * cfg.sampleRate));
+    let ring = new Int16Array(capacitySamples);
+    let writeIndex = 0;
+    let filled = 0;
+
+    let lastTextSent = "";
+    let running = true;
+    let busy = false;
+
+    const interval = setInterval(async () => {
+      if (!running || busy) return;
+      if (filled < Math.floor(cfg.sampleRate * 0.5)) return; // wait for enough audio
+      busy = true;
+
+      try {
+        const pcm = snapshotRing(ring, writeIndex, filled);
+        const wav = pcm16ToWavBuffer(pcm, cfg.sampleRate);
+        const text = await runWhisperOnWav(wav, {
+          whisperCliPath: cfg.whisperCliPath,
+          modelPath: cfg.modelPath,
+          lang: "en",
+        });
+
+        // Send only if changed (reduces spam)
+        if (text && text !== lastTextSent) {
+          lastTextSent = text;
+          ws.send(JSON.stringify({ type: "partial", text }));
+        }
+      } catch (e) {
+        ws.send(JSON.stringify({ type: "error", message: (e as Error).message }));
+      } finally {
+        busy = false;
+      }
+    }, 400);
+
+    ws.on("message", (data) => {
+      // We expect binary PCM16 little-endian
+      if (typeof data === "string") return;
+      const buf = Buffer.from(data as Buffer);
+      const samples = new Int16Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 2));
+
+      for (let i = 0; i < samples.length; i++) {
+        ring[writeIndex] = samples[i];
+        writeIndex = (writeIndex + 1) % ring.length;
+        filled = Math.min(ring.length, filled + 1);
+      }
+    });
+
+    ws.on("close", () => {
+      running = false;
+      clearInterval(interval);
+    });
+  });
+
+  return wss;
+}
+
+function snapshotRing(ring: Int16Array, writeIndex: number, filled: number): Int16Array {
+  const n = filled;
+  const out = new Int16Array(n);
+
+  const start = (writeIndex - n + ring.length) % ring.length;
+
+  if (start + n <= ring.length) {
+    out.set(ring.subarray(start, start + n));
+  } else {
+    const firstLen = ring.length - start;
+    out.set(ring.subarray(start));
+    out.set(ring.subarray(0, n - firstLen), firstLen);
+  }
+  return out;
+}
