@@ -6,9 +6,11 @@ export type RecordingResult = {
 export async function startMic(): Promise<MediaStream> {
     return navigator.mediaDevices.getUserMedia({
         audio: {
+            // Echo cancellation keeps metronome bleed out of the onset detector;
+            // noise suppression and AGC smear the attack envelope it relies on.
             echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
+            noiseSuppression: false,
+            autoGainControl: false,
         },
     });
 }

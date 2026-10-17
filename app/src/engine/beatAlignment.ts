@@ -60,11 +60,20 @@ export function alignWordToBeatGrid(
     config: BeatAlignmentConfig
 ): BeatAlignmentResult {
     const stepMs = getSubdivisionDurationMs(config.bpm, config.subdivision);
-    const elapsedMs = Math.max(0, wordTimeMs - config.startTimeMs);
+    return alignToGrid(wordTimeMs, config.startTimeMs, stepMs);
+}
+
+/** Aligns a time to any evenly spaced grid (e.g. triplets: stepMs = beatMs / 3). */
+export function alignToGrid(
+    wordTimeMs: number,
+    startTimeMs: number,
+    stepMs: number
+): BeatAlignmentResult {
+    const elapsedMs = Math.max(0, wordTimeMs - startTimeMs);
 
     const nearestSubdivisionIndex = Math.round(elapsedMs / stepMs);
     const nearestGridElapsedMs = nearestSubdivisionIndex * stepMs;
-    const nearestGridTimeMs = config.startTimeMs + nearestGridElapsedMs;
+    const nearestGridTimeMs = startTimeMs + nearestGridElapsedMs;
 
     const offsetMs = wordTimeMs - nearestGridTimeMs;
     const absOffsetMs = Math.abs(offsetMs);

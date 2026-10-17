@@ -15,12 +15,13 @@ export default function VisualMetronome({
     barCount,
     size = 28,
 }: VisualMetronomeProps) {
-    const [isPulsing, setIsPulsing] = useState(false);
+    // Pulsing until the timeout marks this token as settled.
+    const [settledToken, setSettledToken] = useState(pulseToken);
+    const isPulsing = settledToken !== pulseToken;
 
     useEffect(() => {
-        setIsPulsing(true);
         const timeout = window.setTimeout(
-            () => setIsPulsing(false),
+            () => setSettledToken(pulseToken),
             isDownbeat ? 210 : 140
         );
 

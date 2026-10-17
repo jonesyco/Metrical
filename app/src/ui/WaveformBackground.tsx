@@ -19,7 +19,7 @@ export default function WaveformBackground({
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const dataArrayRef = useRef<Uint8Array | null>(null);
+  const dataArrayRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
 
   const pulseStrengthRef = useRef(0);
 
@@ -34,6 +34,7 @@ export default function WaveformBackground({
     }
 
     let cancelled = false;
+    const micStream = stream;
 
     async function setup() {
       try {
@@ -49,7 +50,7 @@ export default function WaveformBackground({
         analyser.fftSize = 2048;
         analyser.smoothingTimeConstant = 0.86;
 
-        const source = ctx.createMediaStreamSource(stream);
+        const source = ctx.createMediaStreamSource(micStream);
         source.connect(analyser);
 
         const data = new Uint8Array(analyser.fftSize);
@@ -266,7 +267,7 @@ function drawGrid(
 function getWaveSamples(
   isActive: boolean,
   analyser: AnalyserNode | null,
-  dataArray: Uint8Array | null,
+  dataArray: Uint8Array<ArrayBuffer> | null,
   time: number
 ) {
   const points: number[] = [];

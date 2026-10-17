@@ -28,7 +28,7 @@ export function pcm16ToWavBuffer(pcm: Int16Array, sampleRate = 16000): Buffer {
 
   // PCM samples
   for (let i = 0; i < pcm.length; i++) {
-    buffer.writeInt16LE(pcm[i], 44 + i * 2);
+    buffer.writeInt16LE(pcm[i] ?? 0, 44 + i * 2);
   }
 
   return buffer;

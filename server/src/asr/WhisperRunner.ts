@@ -28,8 +28,6 @@ export async function runWhisperOnWav(
       "-l",
       cfg.lang ?? "en",
       "--no-timestamps",
-      "--print-progress",
-      "0",
       "--threads",
       "4",
     ];

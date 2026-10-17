@@ -22,11 +22,22 @@ export function skillsFromPhrasingMetrics(m: PhrasingMetrics): Partial<SkillScor
     // continuity proxy: penalize pauses on beat1 heavily
     const pausePenalty = (m.pausesOnBeat1 ?? 0) * 12;
     const continuity = clamp(80 - pausePenalty, 0, 100);
-
+    const phraseStart = m.phraseStartAccuracy ?? 0;
+    const phraseEnd = m.phraseEndAccuracy ?? 0;
+    const cadence = m.cadenceStability ?? 0;
+    const phraseConsistency = m.phraseLengthConsistency ?? 0;
     return {
-        phrasing_barStart: clamp(m.barStartStrength ?? 0, 0, 100),
-        phrasing_barEnd: clamp(m.barEndControl ?? 0, 0, 100),
-        phrasing_drift: driftScore,
+        phrasing_barStart: Math.round(
+            ((m.barStartStrength ?? 0) * 0.55) + phraseStart * 0.45
+        ),
+
+        phrasing_barEnd: Math.round(
+            ((m.barEndControl ?? 0) * 0.55) + phraseEnd * 0.45
+        ),
+
+        phrasing_drift: Math.round(
+            driftScore * 0.35 + cadence * 0.4 + phraseConsistency * 0.25
+        ),
         flow_continuity: continuity,
     };
 }
