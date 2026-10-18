@@ -32,11 +32,13 @@ export function estimateLatencyMs(
     return Math.round(med * 1000);
 }
 
-const LATENCY_KEY = "freestyle-trainer.latencyMs";
+const LATENCY_KEY = "metrical.latencyMs";
+// Read once as a fallback so calibrations saved before the rename still load.
+const LEGACY_LATENCY_KEY = "freestyle-trainer.latencyMs";
 
 export function loadLatencyMs(): number | null {
     try {
-        const raw = localStorage.getItem(LATENCY_KEY);
+        const raw = localStorage.getItem(LATENCY_KEY) ?? localStorage.getItem(LEGACY_LATENCY_KEY);
         if (raw == null) return null;
         const n = Number(raw);
         return Number.isFinite(n) ? n : null;

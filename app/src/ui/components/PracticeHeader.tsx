@@ -34,7 +34,7 @@ export default function PracticeHeader({
             }}
         >
             <h1 style={{ margin: 0, fontSize: 20, fontWeight: 900, lineHeight: 1.1 }}>
-                Metronomic Articulator Engine
+                Metrical
             </h1>
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

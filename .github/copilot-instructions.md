@@ -1,4 +1,4 @@
-# Copilot instructions for Freestyle Trainer
+# Copilot instructions for Metrical
 
 ## Build, lint, and test
 

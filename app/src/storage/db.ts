@@ -17,6 +17,7 @@ export type StoredAttempt = {
 };
 
 
+// Database name predates the Metrical rename; changing it would orphan saved history.
 export const dbPromise = openDB("freestyle-trainer", 2, {
     upgrade(db, oldVersion) {
         if (oldVersion < 1) {

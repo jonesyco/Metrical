@@ -15,7 +15,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, service: "freestyle-trainer-server" });
+    res.json({ ok: true, service: "metrical-server" });
 });
 
 /**

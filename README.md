@@ -1,4 +1,4 @@
-# 🎤 Freestyle Trainer
+# 🎤 Metrical
 
 A neuroscience-informed freestyle rap training application that teaches rhythm, flow, and improvisation through structured drills, real-time voice input, and adaptive coaching.
 
@@ -6,7 +6,7 @@ This project combines speech recognition, beat-synchronized feedback, and delibe
 
 ## ✨ Core Concept
 
-Freestyle Trainer acts like a practice coach + drill machine rather than a passive learning app.
+Metrical acts like a practice coach + drill machine rather than a passive learning app.
 
 The system:
 - Runs timed freestyle drills
@@ -31,7 +31,7 @@ The training system incorporates research-backed learning techniques:
 ## 🏗 Architecture Overview
 
 ```
-repo/
+Metrical/
 ├── app/        # React + Vite frontend (practice UI)
 ├── server/     # Node + Express backend API
 └── README.md
@@ -77,9 +77,14 @@ Set `WHISPER_CLI` and `WHISPER_MODEL` in `server/.env` to your whisper.cpp build
 
 ### Installation
 
-**1. Install dependencies**
+**1. Clone and install dependencies**
 
-From repo root:
+```bash
+git clone https://github.com/jonesyco/Metrical.git
+cd Metrical
+```
+
+Then:
 
 ```bash
 cd app
