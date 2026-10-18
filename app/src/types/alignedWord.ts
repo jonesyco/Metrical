@@ -6,3 +6,10 @@ export interface AlignedWord {
     timeMs: number;
     alignment?: BeatAlignmentResult;
 }
+
+/** A detected syllable onset judged against the drill's grid. */
+export interface OnsetHit {
+    id: string;
+    timeSec: number; // AudioContext time, latency-corrected
+    alignment: BeatAlignmentResult;
+}

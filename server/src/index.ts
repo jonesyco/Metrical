@@ -3,6 +3,7 @@ import http from "node:http";
 import express from "express";
 import cors from "cors";
 import { attachAsrWebSocket } from "./asr/AsrWsServer";
+import { transcribeWavWithWords } from "./asr/WhisperWords";
 
 import multer from "multer";
 
@@ -14,33 +15,34 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, service: "freestyle-trainer-server" });
+    res.json({ ok: true, service: "metrical-server" });
 });
 
 /**
- * MOCK transcription endpoint.
- * Accepts audio file and returns a fake transcript + fake word timestamps.
- * Replace this with real STT later (e.g., Whisper).
+ * Final transcription for a finished take. Expects a 16 kHz mono PCM16 WAV
+ * (the browser converts the recording before upload) and returns word-level
+ * timestamps in seconds from the start of the file.
  */
 app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No audio file uploaded" });
 
-    // In a real version you’d run STT on req.file.buffer.
-    // For now, return predictable mock data so the pipeline works.
-    const transcript = "yeah uh I’m practicing bars on the beat staying in the pocket";
-    const words = transcript.split(" ").map((w, i) => ({
-        word: w,
-        start: i * 0.25,
-        end: i * 0.25 + 0.18,
-    }));
+    if (!process.env.WHISPER_CLI || !process.env.WHISPER_MODEL) {
+        return res.status(503).json({ error: "WHISPER_CLI / WHISPER_MODEL not configured" });
+    }
 
-    res.json({
-        transcript,
-        words,
-    });
+    try {
+        const result = await transcribeWavWithWords(req.file.buffer, {
+            whisperCliPath: process.env.WHISPER_CLI,
+            modelPath: process.env.WHISPER_MODEL,
+            lang: "en",
+        });
+        res.json(result);
+    } catch (e) {
+        console.error("[transcribe] failed:", e);
+        res.status(500).json({ error: (e as Error).message });
+    }
 });
 
-const port = process.env.PORT ? Number(process.env.PORT) : 8787;
 const server = http.createServer(app);
 
 attachAsrWebSocket(server, {
@@ -51,5 +53,5 @@ attachAsrWebSocket(server, {
   sampleRate: 16000,
 });
 
-const PORT = Number(process.env.Port ?? 3001);
+const PORT = Number(process.env.PORT ?? 3001);
 server.listen(PORT, () => console.log(`HTTP+WS listening on ${PORT}`));

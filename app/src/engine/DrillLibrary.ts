@@ -9,6 +9,7 @@ export const DRILLS: Record<DrillId, Drill> = {
         targets: ["flow_continuity", "phrasing_barStart"],
         difficulty: 1,
         cognitiveLoad: 1,
+        scoring: { kind: "grid", subdivision: 1 },
     },
 
     RL4_LAND_LAST_WORD: {
@@ -19,6 +20,7 @@ export const DRILLS: Record<DrillId, Drill> = {
         targets: ["phrasing_barEnd", "phrasing_barStart"],
         difficulty: 3,
         cognitiveLoad: 3,
+        scoring: { kind: "barEnd", subdivision: 1 },
     },
 
     AF1_ASSOC_EVERY_2BARS: {
@@ -29,6 +31,7 @@ export const DRILLS: Record<DrillId, Drill> = {
         targets: ["flow_continuity", "phrasing_drift"],
         difficulty: 3,
         cognitiveLoad: 4,
+        scoring: { kind: "association", subdivision: 4 },
         prompts: { mode: "visual", intervalBeats: 8 }, // 2 bars = 8 beats
     },
 
@@ -40,6 +43,7 @@ export const DRILLS: Record<DrillId, Drill> = {
         targets: ["flow_continuity"],
         difficulty: 2,
         cognitiveLoad: 2,
+        scoring: { kind: "continuity", subdivision: 4 },
     },
 
     NS2_NO_STOP_40S: {
@@ -50,9 +54,91 @@ export const DRILLS: Record<DrillId, Drill> = {
         targets: ["flow_continuity", "phrasing_drift"],
         difficulty: 4,
         cognitiveLoad: 4,
+        scoring: { kind: "continuity", subdivision: 4 },
+        unlockScore: 40,
+    },
+
+    RL2_TWO_WORDS_PER_BEAT: {
+        id: "RL2_TWO_WORDS_PER_BEAT",
+        title: "Rhythm Lock: Two Words Per Beat",
+        description: "Fit two words into each beat while staying locked to the metronome.",
+        durationSec: 35,
+        targets: ["flow_continuity", "phrasing_drift"],
+        difficulty: 2,
+        cognitiveLoad: 2,
+        scoring: { kind: "grid", subdivision: 2 },
+    },
+    RL3_TRIPLET_FLOW: {
+        id: "RL3_TRIPLET_FLOW",
+        title: "Rhythm Lock: Triplet Flow",
+        description: "Use triplet timing. Three syllables per beat.",
+        durationSec: 40,
+        targets: ["phrasing_drift", "flow_continuity"],
+        difficulty: 4,
+        cognitiveLoad: 4,
+        scoring: { kind: "grid", subdivision: 3 },
+        unlockScore: 45,
+    },
+    RL5_BAR_START_PUNCH: {
+        id: "RL5_BAR_START_PUNCH",
+        title: "Rhythm Lock: Punch Beat One",
+        description: "Start each bar with a strong word on beat 1.",
+        durationSec: 35,
+        targets: ["phrasing_barStart"],
+        difficulty: 2,
+        cognitiveLoad: 2,
+        scoring: { kind: "barStart", subdivision: 1 },
+    },
+    AF2_ASSOC_EVERY_BAR: {
+        id: "AF2_ASSOC_EVERY_BAR",
+        title: "Association Flow: New Word Every Bar",
+        description: "A new prompt appears every bar. Integrate it immediately.",
+        durationSec: 50,
+        targets: ["flow_continuity", "phrasing_drift"],
+        difficulty: 4,
+        cognitiveLoad: 5,
+        scoring: { kind: "association", subdivision: 4 },
+        unlockScore: 50,
+        prompts: { mode: "visual", intervalBeats: 4 },
+    },
+    AF3_ASSOC_EVERY_BEAT: {
+        id: "AF3_ASSOC_EVERY_BEAT",
+        title: "Association Flow: Rapid Fire",
+        description: "A new word appears every beat. Keep flowing.",
+        durationSec: 30,
+        targets: ["flow_continuity"],
+        difficulty: 5,
+        cognitiveLoad: 6,
+        scoring: { kind: "association", subdivision: 4 },
+        unlockScore: 65,
+        prompts: { mode: "visual", intervalBeats: 1 },
+    },
+    NS3_NO_STOP_60S: {
+        id: "NS3_NO_STOP_60S",
+        title: "No-Stop Freestyle: 60 Seconds",
+        description: "Sustain rhythm and momentum for a full minute.",
+        durationSec: 60,
+        targets: ["flow_continuity", "phrasing_drift"],
+        difficulty: 5,
+        cognitiveLoad: 5,
+        scoring: { kind: "continuity", subdivision: 4 },
+        unlockScore: 55,
     },
 };
 
+export const DRILL_SEQUENCE: DrillId[] = [
+    "RL1_WORD_ON_BEAT",
+    "RL2_TWO_WORDS_PER_BEAT",
+    "RL4_LAND_LAST_WORD",
+    "AF1_ASSOC_EVERY_2BARS",
+    "NS1_NO_STOP_20S",
+    "RL3_TRIPLET_FLOW",
+    "RL5_BAR_START_PUNCH",
+    "AF2_ASSOC_EVERY_BAR",
+    "NS2_NO_STOP_40S",
+    "NS3_NO_STOP_60S",
+    "AF3_ASSOC_EVERY_BEAT",
+];
 export const WARMUP_DRILL: DrillId = "RL1_WORD_ON_BEAT";
 
 export const SKILL_DISPLAY: Record<string, { label: string; tip: string }> = {

@@ -1,4 +1,4 @@
-# 🎤 Metronomic Articulator Engine
+# 🎤 Metrical
 
 A neuroscience-informed speech training application that teaches rhythm, flow, and improvisation through structured drills, real-time voice input, and adaptive coaching. (originally I built this as a freestyle rap battle trainer, but evolution occurs)
 
@@ -6,7 +6,7 @@ This project combines speech recognition, beat-synchronized feedback, and delibe
 
 ## ✨ Core Concept
 
-M.A.E. acts like a practice coach + drill machine rather than a passive learning app.
+Metrical acts like a practice coach + drill machine rather than a passive learning app.
 
 The system:
 - Runs timed freestyle drills
@@ -31,7 +31,7 @@ The training system incorporates research-backed learning techniques:
 ## 🏗 Architecture Overview
 
 ```
-repo/
+Metrical/
 ├── app/        # React + Vite frontend (practice UI)
 ├── server/     # Node + Express backend API
 └── README.md
@@ -43,26 +43,28 @@ repo/
 - React
 - TypeScript
 - Vite
-- Web Audio API (metronome + timing)
-- Web Speech API (live transcription)
+- Web Audio API (metronome, AudioWorklet syllable-onset detection)
+- whisper.cpp via the backend (live partial text + final word timestamps)
 
 **Key systems:**
 
 | Module | Purpose |
 |--------|---------|
 | PracticeScreen | Main training interface |
-| LiveSpeech | Real-time speech recognition |
-| Metronome | Beat timing + synchronization |
-| TimingAnalyzer | Rhythm & phrasing analysis |
+| Metronome | Click/beat scheduling on the shared AudioContext clock |
+| LiveCapture + OnsetDetector | Mic capture and syllable-onset timing |
+| RhythmAnalyzer + DrillScoring | Grid timing, bar structure, continuity, per-drill scores |
+| RhymeAnalyzer / TimingAnalyzer | Rhyme density and phrasing from the final transcript |
 | Curriculum Engine | Adaptive drill progression |
 
 ### Backend (Node/Express)
 
 Provides:
-- Session persistence
-- Drill history storage
-- Analysis results API
-- Future adaptive curriculum logic
+- `/ws/asr`: live partial transcripts (rolling whisper.cpp window)
+- `POST /api/transcribe`: word-level transcript of a finished take (16 kHz WAV in)
+
+Session history and skills are stored in the browser (IndexedDB).
+Set `WHISPER_CLI` and `WHISPER_MODEL` in `server/.env` to your whisper.cpp build and model.
 
 ## 🚀 Getting Started
 
@@ -70,15 +72,19 @@ Provides:
 
 - Node.js 18+
 - npm
-- Chrome or Edge browser (required for SpeechRecognition API)
-
-> ⚠️ Firefox currently does not support the Web Speech API.
+- Chrome or Edge browser (AudioWorklet + MediaRecorder webm/opus)
+- A whisper.cpp build (`whisper-cli`) and model for transcription; rhythm scoring works without it
 
 ### Installation
 
-**1. Install dependencies**
+**1. Clone and install dependencies**
 
-From repo root:
+```bash
+git clone https://github.com/jonesyco/Metrical.git
+cd Metrical
+```
+
+Then:
 
 ```bash
 cd app
@@ -114,36 +120,34 @@ The app requires microphone access.
 
 When prompted by the browser:
 - Allow microphone access
-- Use a standard system microphone (Bluetooth devices may behave inconsistently)
+- Use headphones so the click/beat doesn't leak into the mic
+- Run **Calibrate Timing** once per audio setup (clap on 8 clicks); Bluetooth adds large, variable latency
 
 ## 🎯 Current Features
 
-✅ Metronome-driven practice drills
-✅ Voice recording and transcription
-✅ Real-time word detection
-✅ Beat-aware training foundation
-✅ Coaching feedback generation
-✅ Adaptive session structure (early version)
+✅ Metronome or boom-bap beat with count-in
+✅ Syllable-level timing against the beat grid (latency-calibrated)
+✅ Drill-specific scoring (grid, downbeats, bar endings, continuity, prompt use)
+✅ Association drills with on-screen word prompts
+✅ Final transcript with word timestamps, phrasing and rhyme density
+✅ Light and technical coaching modes
+✅ Adaptive curriculum with spaced repetition and unlockable drills
+✅ Progress view (skill trends, recent takes)
 
 ## 🧩 Planned Features
 
-- Beat-synced word ribbon (rhythm HUD)
-- Technical coaching mode
-- Rhyme density analysis
-- Flow consistency scoring
 - Style development tracking
-- Personalized curriculum engine
+- Free Flow reward mode
 - Desktop build (Electron)
 
 ## 🧪 Development Notes
 
-### Speech Recognition
+### Tests
 
-Uses the browser Web Speech API:
-- `window.SpeechRecognition`
-- `window.webkitSpeechRecognition`
-
-Supported primarily in Chromium browsers.
+```bash
+cd app && npm test
+cd server && npm test
+```
 
 ### Type Declarations
 

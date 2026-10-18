@@ -1,3 +1,6 @@
+import { segmentPhrases } from "./PhraseAnalyzer";
+import { scorePhraseTiming } from "./PhraseTimingMath";
+
 type WordTS = { word: string; start: number; end: number };
 
 export type Phrase = {
@@ -13,6 +16,13 @@ export type PhrasingMetrics = {
     avgPhraseBeats: number;
     pausesOnBeat1: number;
     pausesOnBeat4: number;
+    phraseStartAccuracy?: number;
+    phraseEndAccuracy?: number;
+    phraseLengthConsistency?: number;
+    barCompletionRate?: number;
+    cadenceStability?: number;
+    avgPhraseWords?: number;
+    phraseCount?: number;
 };
 
 export function detectPhrases(words: WordTS[], pauseMs = 650): Phrase[] {
@@ -107,6 +117,45 @@ export function analyzePhrasing(params: {
         if (o >= 3.0 && o <= 4.2) pausesOnBeat4++;
     }
 
+    const segmentedPhrases = segmentPhrases({
+        words,
+        pauseThresholdSec: 0.45,
+    });
+
+    const phraseTiming = scorePhraseTiming({
+        phraseStarts: segmentedPhrases.map((p) => p.startSec),
+        phraseEnds: segmentedPhrases.map((p) => p.endSec),
+        bpm,
+        beatsPerBar: 4,
+    });
+
+    const avgPhraseWords =
+        segmentedPhrases.length > 0
+            ? segmentedPhrases.reduce((sum, p) => sum + p.words.length, 0) / segmentedPhrases.length
+            : 0;
+
+    const phraseDurations = segmentedPhrases.map((p) => p.endSec - p.startSec);
+    const phraseLengthConsistency =
+        phraseDurations.length > 1
+            ? Math.max(
+                0,
+                Math.min(
+                    100,
+                    Math.round(100 - standardDeviation(phraseDurations) * 35)
+                )
+            )
+            : 100;
+
+    const barDurationSec = (60 / bpm) * 4;
+    const barCompletionRate =
+        segmentedPhrases.length > 0
+            ? Math.round(
+                (segmentedPhrases.filter((p) => p.endSec - p.startSec >= barDurationSec * 0.6).length /
+                    segmentedPhrases.length) *
+                100
+            )
+            : 0;
+
     return {
         phrases,
         metrics: {
@@ -116,6 +165,21 @@ export function analyzePhrasing(params: {
             avgPhraseBeats,
             pausesOnBeat1,
             pausesOnBeat4,
+            phraseStartAccuracy: phraseTiming.phraseStartAccuracy,
+            phraseEndAccuracy: phraseTiming.phraseEndAccuracy,
+            phraseLengthConsistency,
+            barCompletionRate,
+            cadenceStability: phraseTiming.cadenceStability,
+            avgPhraseWords: Math.round(avgPhraseWords * 10) / 10,
+            phraseCount: segmentedPhrases.length,
         },
     };
+
+    function standardDeviation(values: number[]): number {
+        if (values.length <= 1) return 0;
+        const avg = values.reduce((a, b) => a + b, 0) / values.length;
+        const variance =
+            values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / values.length;
+        return Math.sqrt(variance);
+    }
 }

@@ -1,5 +1,10 @@
+import { ensureWorkletModule } from "./LiveCapture";
+
+export type AsrStatus = "idle" | "connecting" | "open" | "closed";
+
 export type WhisperStreamHandle = {
-  start: (stream?: MediaStream) => Promise<void>;
+  /** Streams `source` (which must belong to `ctx`) to the ASR server. */
+  start: (ctx: AudioContext, source: AudioNode) => Promise<void>;
   stop: () => void;
   isRunning: () => boolean;
 };
@@ -8,80 +13,74 @@ export function createWhisperStream(params: {
   wsUrl: string; // "ws://localhost:3001/ws/asr"
   onPartialText: (text: string) => void;
   onError?: (msg: string) => void;
+  onStatus?: (status: AsrStatus) => void;
 }): WhisperStreamHandle {
   let ws: WebSocket | null = null;
-  let ctx: AudioContext | null = null;
-  let source: MediaStreamAudioSourceNode | null = null;
   let node: AudioWorkletNode | null = null;
-  let stream: MediaStream | null = null;
+  let sink: GainNode | null = null;
+  let sampleRate = 48000;
 
   let running = false;
   let reconnectAttempts = 0;
   let reconnectTimer: number | null = null;
 
-  async function start() {
-   if (running) return;
-   running = true;
-   reconnectAttempts = 0;
+  function connect() {
+    params.onStatus?.("connecting");
+    const socket = new WebSocket(params.wsUrl);
+    socket.binaryType = "arraybuffer";
+    ws = socket;
 
-   try {
-	 ws = new WebSocket(params.wsUrl);
-	 console.log("[ASR WS] connecting to", params.wsUrl);
-	 ws.binaryType = "arraybuffer";
+    socket.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data as string);
+        if (msg.type === "partial") params.onPartialText(msg.text);
+        if (msg.type === "error") params.onError?.(msg.message);
+      } catch {
+        // ignore non-JSON frames
+      }
+    };
 
-	 ws.onmessage = (ev) => {
-	   try {
-		 const msg = JSON.parse(ev.data as string);
-		 if (msg.type === "partial") params.onPartialText(msg.text);
-		 if (msg.type === "error") params.onError?.(msg.message);
-	   } catch {
-		 // ignore
-	   }
-	 };
+    socket.onopen = () => {
+      reconnectAttempts = 0;
+      params.onStatus?.("open");
+    };
 
-	 ws.onopen = () => {
-	   console.log("[ASR WS] open");
-	   reconnectAttempts = 0;
-	 };
+    socket.onclose = () => {
+      if (ws !== socket) return;
+      params.onStatus?.("closed");
+      attemptReconnect();
+    };
 
-	 ws.onclose = () => {
-	   console.log("[ASR WS] close");
-	   attemptReconnect();
-	 };
+    socket.onerror = () => {
+      params.onError?.("WebSocket error");
+    };
+  }
 
-	 ws.onerror = (e) => {
-	   console.log("[ASR WS] error", e);
-	   params.onError?.("WebSocket error");
-	 };
+  async function start(ctx: AudioContext, source: AudioNode) {
+    if (running) return;
+    running = true;
+    reconnectAttempts = 0;
+    sampleRate = ctx.sampleRate;
 
-      // mic
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+    try {
+      connect();
 
-      ctx = new AudioContext();
-      // Worklet must be added before creating node
-      await ctx.audioWorklet.addModule("/asr-worklet.js");
-
-      source = ctx.createMediaStreamSource(stream);
+      await ensureWorkletModule(ctx, "/asr-worklet.js");
       node = new AudioWorkletNode(ctx, "asr-processor");
 
       node.port.onmessage = (ev) => {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        const float32 = ev.data; // Float32Array
-        const pcm16 = downsampleFloatTo16kPCM16(float32, ctx!.sampleRate);
+        const pcm16 = downsampleFloatTo16kPCM16(ev.data as Float32Array, sampleRate);
         if (pcm16.byteLength > 0) ws.send(pcm16);
       };
 
-      // Connect graph (worklet needs audio flow)
+      // Worklet needs to be pulled by the graph; route it through a muted gain.
+      sink = ctx.createGain();
+      sink.gain.value = 0;
       source.connect(node);
-      node.connect(ctx.destination);
+      node.connect(sink);
+      sink.connect(ctx.destination);
     } catch (e) {
-      running = false;
       params.onError?.((e as Error).message);
       stop();
     }
@@ -91,8 +90,9 @@ export function createWhisperStream(params: {
     if (!running || reconnectAttempts >= 5) return;
     const backoffMs = Math.min(10000, 1000 * Math.pow(2, reconnectAttempts));
     reconnectAttempts++;
-    console.log(`[ASR WS] reconnecting in ${backoffMs}ms (attempt ${reconnectAttempts})`);
-    reconnectTimer = window.setTimeout(() => start(), backoffMs);
+    reconnectTimer = window.setTimeout(() => {
+      if (running) connect();
+    }, backoffMs);
   }
 
   function stop() {
@@ -100,22 +100,18 @@ export function createWhisperStream(params: {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = null;
 
-    try { ws?.close(); } catch {}
+    const socket = ws;
     ws = null;
+    try { socket?.close(); } catch { /* already closed */ }
 
-    try { node?.disconnect(); } catch {}
+    if (node) node.port.onmessage = null;
+    try { node?.disconnect(); } catch { /* already disconnected */ }
     node = null;
 
-    try { source?.disconnect(); } catch {}
-    source = null;
+    try { sink?.disconnect(); } catch { /* already disconnected */ }
+    sink = null;
 
-    try { ctx?.close(); } catch {}
-    ctx = null;
-
-    if (stream) {
-      for (const t of stream.getTracks()) t.stop();
-    }
-    stream = null;
+    params.onStatus?.("idle");
   }
 
   return { start, stop, isRunning: () => running };
