@@ -1,6 +1,6 @@
 # 🎤 Metrical
 
-A neuroscience-informed freestyle rap training application that teaches rhythm, flow, and improvisation through structured drills, real-time voice input, and adaptive coaching.
+A neuroscience-informed speech training application that teaches rhythm, flow, and improvisation through structured drills, real-time voice input, and adaptive coaching. (originally I built this as a freestyle rap battle trainer, but evolution occurs)
 
 This project combines speech recognition, beat-synchronized feedback, and deliberate practice design to help beginners develop freestyle skills progressively.
 
